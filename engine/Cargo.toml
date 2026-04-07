@@ -1,0 +1,12 @@
+[package]
+name = "reactive-bgm-engine"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+glicol = "0.13"
+cpal = "0.15"
+log = "0.4"

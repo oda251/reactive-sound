@@ -1,0 +1,102 @@
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{Device, SampleFormat, Stream, StreamConfig};
+use std::sync::mpsc;
+use std::sync::Mutex;
+
+use crate::core::{DspProcessor, EngineConfig, Pattern};
+use crate::shell::bridge::Bridge;
+use crate::shell::command::Command;
+
+pub struct AudioOutput {
+    _stream: Stream,
+    cmd_tx: mpsc::Sender<Command>,
+}
+
+impl AudioOutput {
+    pub fn start(config: &EngineConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        let device = resolve_device(config)?;
+        let stream_config = device.default_output_config()?;
+
+        let sample_rate = config.sample_rate_or(stream_config.sample_rate().0);
+        let pattern = Pattern::new(sample_rate);
+        let dsp = DspProcessor::new(sample_rate, pattern.block_size());
+
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let bridge = Mutex::new(Bridge::new(pattern, dsp, cmd_rx, config));
+
+        let stream = match stream_config.sample_format() {
+            SampleFormat::F32 => build_stream_f32(&device, &stream_config.into(), bridge)?,
+            SampleFormat::I16 => build_stream_convert::<i16>(&device, &stream_config.into(), bridge)?,
+            fmt => return Err(format!("unsupported sample format: {fmt:?}").into()),
+        };
+
+        stream.play()?;
+        Ok(Self {
+            _stream: stream,
+            cmd_tx,
+        })
+    }
+
+    pub fn send(&self, cmd: Command) -> Result<(), mpsc::SendError<Command>> {
+        self.cmd_tx.send(cmd)
+    }
+}
+
+fn resolve_device(config: &EngineConfig) -> Result<Device, Box<dyn std::error::Error>> {
+    let host = cpal::default_host();
+
+    if let Some(name) = &config.device_name {
+        let devices = host.output_devices()?;
+        for d in devices {
+            if d.name().map(|n| n.contains(name.as_str())).unwrap_or(false) {
+                return Ok(d);
+            }
+        }
+        return Err(format!("audio device not found: {name}").into());
+    }
+
+    host.default_output_device()
+        .ok_or_else(|| "no default output device".into())
+}
+
+fn build_stream_f32(
+    device: &Device,
+    config: &StreamConfig,
+    bridge: Mutex<Bridge>,
+) -> Result<Stream, Box<dyn std::error::Error>> {
+    let stream = device.build_output_stream(
+        config,
+        move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            if let Ok(mut br) = bridge.lock() {
+                br.fill(data);
+            }
+        },
+        |err| log::error!("audio stream error: {err}"),
+        None,
+    )?;
+    Ok(stream)
+}
+
+fn build_stream_convert<T: cpal::Sample + cpal::SizedSample + cpal::FromSample<f32> + Send + 'static>(
+    device: &Device,
+    config: &StreamConfig,
+    bridge: Mutex<Bridge>,
+) -> Result<Stream, Box<dyn std::error::Error>> {
+    let mut convert_buf: Vec<f32> = Vec::new();
+
+    let stream = device.build_output_stream(
+        config,
+        move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+            if let Ok(mut br) = bridge.lock() {
+                convert_buf.resize(data.len(), 0.0);
+                br.fill(&mut convert_buf);
+                for (i, sample) in data.iter_mut().enumerate() {
+                    *sample = T::from_sample(convert_buf[i]);
+                }
+            }
+        },
+        |err| log::error!("audio stream error: {err}"),
+        None,
+    )?;
+    Ok(stream)
+}

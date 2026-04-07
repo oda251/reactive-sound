@@ -1,0 +1,10 @@
+[package]
+name = "reactive-bgm-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+reactive-bgm-engine = { path = "../engine" }
+env_logger = "0.11"
+eframe = { version = "0.34", default-features = false, features = ["default_fonts", "glow"] }
+rdev = "0.5"
