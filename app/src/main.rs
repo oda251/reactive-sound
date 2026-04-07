@@ -1,25 +1,28 @@
 mod input;
-mod mapper;
+mod interpreter;
+mod recorder;
 
 use eframe::egui;
-use reactive_bgm_engine::{Engine, PARAM_FREQ, PARAM_GAIN, PARAM_GATE};
+use reactive_bgm_engine::{Engine, InputEvent};
 use std::sync::mpsc;
+use std::time::Instant;
 
-use input::{start_keyboard_listener, TypingStats};
-use mapper::Mapper;
+use interpreter::{Interpreter, RawRhythmInterpreter, LOOP_DURATION_SECS, MEASURES};
+use recorder::Recorder;
 
 fn main() {
     env_logger::init();
 
     let engine = Engine::start_default().expect("failed to start engine");
 
-    engine.update_pattern("o: sin 220 >> mul 0.05").expect("pattern");
+    let (event_tx, event_rx) = mpsc::channel::<InputEvent>();
 
-    let kb_rx = start_keyboard_listener();
+    input::start_rdev_adapter(event_tx.clone());
+    let egui_tx = event_tx;
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([400.0, 300.0])
+            .with_inner_size([520.0, 420.0])
             .with_title("Reactive BGM"),
         ..Default::default()
     };
@@ -27,97 +30,166 @@ fn main() {
     eframe::run_native(
         "Reactive BGM",
         options,
-        Box::new(move |_cc| Ok(Box::new(App::new(engine, kb_rx)))),
+        Box::new(move |_cc| Ok(Box::new(App::new(engine, egui_tx, event_rx)))),
     )
     .expect("failed to run eframe");
 }
 
+const UPDATE_INTERVAL_MS: u128 = 2000;
+
 struct App {
     engine: Engine,
-    kb_rx: mpsc::Receiver<TypingStats>,
-    mapper: Mapper,
-    wpm: f32,
+    egui_tx: mpsc::Sender<InputEvent>,
+    event_rx: mpsc::Receiver<InputEvent>,
+    recorder: Recorder,
+    interpreter: RawRhythmInterpreter,
     key_count: u64,
-    tier_label: &'static str,
+    last_update: Option<Instant>,
+    /// Committed note positions (0.0..1.0) for GUI display.
+    note_positions: Vec<f32>,
 }
 
 impl App {
-    fn new(engine: Engine, kb_rx: mpsc::Receiver<TypingStats>) -> Self {
+    fn new(
+        engine: Engine,
+        egui_tx: mpsc::Sender<InputEvent>,
+        event_rx: mpsc::Receiver<InputEvent>,
+    ) -> Self {
         Self {
             engine,
-            kb_rx,
-            mapper: Mapper::new(),
-            wpm: 0.0,
+            egui_tx,
+            event_rx,
+            recorder: Recorder::new(),
+            interpreter: RawRhythmInterpreter,
             key_count: 0,
-            tier_label: "Idle",
+            last_update: None,
+            note_positions: Vec::new(),
         }
-    }
-
-    fn apply_params(&self, params: &mapper::MappedParams) {
-        let _ = self.engine.update_pattern(params.pattern);
-        let _ = self.engine.set_synth_param(PARAM_FREQ, params.freq);
-        let _ = self.engine.set_synth_param(PARAM_GAIN, params.gain);
-        let _ = self.engine.set_synth_param(PARAM_GATE, if params.gate { 1.0 } else { 0.0 });
     }
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // Drain keyboard events
-        while let Ok(stats) = self.kb_rx.try_recv() {
-            self.wpm = stats.wpm;
-            self.key_count = stats.key_count;
+        input::drain_egui_keys(ui.ctx(), &self.egui_tx);
 
-            if let Some(params) = self.mapper.update(self.wpm) {
-                self.tier_label = params.label;
-                eprintln!("[{:.0} WPM] Tier changed → {}", self.wpm, self.tier_label);
-                self.apply_params(&params);
-            }
+        let now = Instant::now();
+
+        while let Ok(event) = self.event_rx.try_recv() {
+            self.key_count += 1;
+            self.recorder.record(&event, now);
         }
 
+        let should_update = match self.last_update {
+            Some(last) => now.duration_since(last).as_millis() >= UPDATE_INTERVAL_MS,
+            None => true,
+        };
+
+        if should_update {
+            let score = self.interpreter.interpret(self.recorder.timestamps(), now);
+            self.note_positions = score.events.iter().map(|e| e.position).collect();
+            let _ = self.engine.set_score(score);
+            self.last_update = Some(now);
+        }
+
+        // Playhead from the audio thread — single source of truth
+        let playhead = self.engine.playhead();
+        let current_measure = ((playhead * MEASURES as f32) as usize).min(MEASURES - 1);
+        let measure_playhead = (playhead * MEASURES as f32).fract();
+
+        // Split note positions into per-measure buckets
+        let mut measure_events: Vec<Vec<f32>> = vec![Vec::new(); MEASURES];
+        for &pos in &self.note_positions {
+            let m = ((pos * MEASURES as f32) as usize).min(MEASURES - 1);
+            let pos_in_m = (pos * MEASURES as f32).fract();
+            measure_events[m].push(pos_in_m);
+        }
+
+        // --- UI ---
         ui.heading("Reactive BGM");
         ui.separator();
 
         ui.horizontal(|ui| {
-            ui.label("WPM:");
-            ui.strong(format!("{:.0}", self.wpm));
-        });
-
-        ui.horizontal(|ui| {
             ui.label("Keys:");
             ui.strong(format!("{}", self.key_count));
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("Tier:");
-            ui.strong(self.tier_label);
+            ui.label("  Events:");
+            ui.strong(format!("{}", self.recorder.event_count()));
         });
 
         ui.separator();
+        ui.label("Type anywhere — your rhythm becomes music");
+        ui.add_space(4.0);
 
-        // WPM bar
-        let bar_width = (self.wpm / 120.0).clamp(0.0, 1.0);
-        let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), 24.0),
-            egui::Sense::hover(),
-        );
-        ui.painter().rect_filled(
-            rect,
-            4.0,
-            egui::Color32::from_gray(60),
-        );
-        let filled = egui::Rect::from_min_size(
-            rect.min,
-            egui::vec2(rect.width() * bar_width, rect.height()),
-        );
-        let color = match self.tier_label {
-            "Idle" => egui::Color32::from_rgb(80, 80, 120),
-            "Slow" => egui::Color32::from_rgb(80, 120, 80),
-            "Medium" => egui::Color32::from_rgb(180, 180, 60),
-            _ => egui::Color32::from_rgb(200, 80, 60),
-        };
-        ui.painter().rect_filled(filled, 4.0, color);
+        let lane_width = ui.available_width() - 30.0;
+        let lane_height = 20.0;
+        let lane_spacing = 2.0;
 
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        for m in 0..MEASURES {
+            let is_playing = m == current_measure;
+
+            ui.horizontal(|ui| {
+                ui.label(format!("{:>2}", m + 1));
+
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(lane_width, lane_height),
+                    egui::Sense::hover(),
+                );
+
+                let bg = if is_playing {
+                    egui::Color32::from_gray(35)
+                } else {
+                    egui::Color32::from_gray(25)
+                };
+                ui.painter().rect_filled(rect, 2.0, bg);
+
+                // Beat lines
+                for beat in 1..4 {
+                    let x = rect.min.x + lane_width * (beat as f32 / 4.0);
+                    ui.painter().line_segment(
+                        [egui::pos2(x, rect.min.y), egui::pos2(x, rect.max.y)],
+                        egui::Stroke::new(1.0, egui::Color32::from_gray(45)),
+                    );
+                }
+
+                // Note markers
+                for &event_pos in &measure_events[m] {
+                    let x = rect.min.x + lane_width * event_pos;
+                    let note_rect = egui::Rect::from_min_size(
+                        egui::pos2(x - 1.5, rect.min.y + 2.0),
+                        egui::vec2(3.0, lane_height - 4.0),
+                    );
+
+                    let played = if m < current_measure {
+                        true
+                    } else if m == current_measure {
+                        event_pos < measure_playhead
+                    } else {
+                        false
+                    };
+
+                    let color = if played {
+                        egui::Color32::from_rgb(30, 80, 30)
+                    } else {
+                        egui::Color32::from_rgb(60, 220, 60)
+                    };
+                    ui.painter().rect_filled(note_rect, 1.0, color);
+                }
+
+                // Playhead in current measure
+                if is_playing {
+                    let ph_x = rect.min.x + lane_width * measure_playhead;
+                    ui.painter().line_segment(
+                        [egui::pos2(ph_x, rect.min.y), egui::pos2(ph_x, rect.max.y)],
+                        egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 80, 80)),
+                    );
+                }
+            });
+
+            if m < MEASURES - 1 {
+                ui.add_space(lane_spacing);
+            }
+        }
+
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(16));
     }
 }

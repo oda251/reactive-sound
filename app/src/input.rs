@@ -1,55 +1,37 @@
+use reactive_bgm_engine::InputEvent;
 use rdev::{listen, Event, EventType};
 use std::sync::mpsc;
 use std::time::Instant;
 
-pub struct TypingStats {
-    pub wpm: f32,
-    pub key_count: u64,
+/// Spawns a background thread that captures global keyboard events
+/// and sends InputEvents via the provided sender.
+pub fn start_rdev_adapter(tx: mpsc::Sender<InputEvent>) {
+    std::thread::spawn(move || {
+        listen(move |event| {
+            if let Event {
+                event_type: EventType::KeyPress(_),
+                ..
+            } = event
+            {
+                let _ = tx.send(InputEvent::KeyPress {
+                    timestamp: Instant::now(),
+                });
+            }
+        })
+        .expect("failed to listen for keyboard events");
+    });
 }
 
-/// Spawns a background thread that captures global keyboard events
-/// and sends TypingStats updates via the returned receiver.
-pub fn start_keyboard_listener() -> mpsc::Receiver<TypingStats> {
-    let (tx, rx) = mpsc::channel();
-
-    std::thread::spawn(move || {
-        let (event_tx, event_rx) = mpsc::channel();
-
-        std::thread::spawn(move || {
-            listen(move |event| {
-                let _ = event_tx.send(event);
-            })
-            .expect("failed to listen for keyboard events");
-        });
-
-        let mut timestamps: Vec<Instant> = Vec::new();
-        let window_secs = 5.0;
-        let mut key_count: u64 = 0;
-
-        loop {
-            match event_rx.recv() {
-                Ok(Event {
-                    event_type: EventType::KeyPress(_),
-                    ..
-                }) => {
-                    let now = Instant::now();
-                    key_count += 1;
-                    timestamps.push(now);
-
-                    // Remove old timestamps outside the window
-                    timestamps.retain(|t| now.duration_since(*t).as_secs_f32() < window_secs);
-
-                    // Calculate WPM (assuming average 5 chars per word)
-                    let keys_in_window = timestamps.len() as f32;
-                    let wpm = (keys_in_window / 5.0) * (60.0 / window_secs);
-
-                    let _ = tx.send(TypingStats { wpm, key_count });
-                }
-                Ok(_) => {}
-                Err(_) => break,
-            }
-        }
+/// Drains egui key events and sends them as InputEvents.
+pub fn drain_egui_keys(ctx: &eframe::egui::Context, tx: &mpsc::Sender<InputEvent>) {
+    let count = ctx.input(|i| {
+        i.events
+            .iter()
+            .filter(|e| matches!(e, eframe::egui::Event::Key { pressed: true, .. }))
+            .count()
     });
-
-    rx
+    let now = Instant::now();
+    for _ in 0..count {
+        let _ = tx.send(InputEvent::KeyPress { timestamp: now });
+    }
 }

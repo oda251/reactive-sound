@@ -1,48 +1,57 @@
 use std::sync::mpsc;
 
-use crate::core::{DspProcessor, EngineConfig, Pattern};
+use crate::core::dsp::PARAM_FREQ;
+use crate::core::{DspProcessor, EngineConfig, EventKind, Scheduler};
 use crate::shell::command::Command;
 
 pub struct Bridge {
-    pattern: Pattern,
+    scheduler: Scheduler,
     dsp: DspProcessor,
     cmd_rx: mpsc::Receiver<Command>,
     channels: u16,
-    block_samples: usize,
+    block_size: usize,
     ring: Vec<f32>,
     ring_read: usize,
     ring_avail: usize,
-    glicol_buf: Vec<f32>,
     faust_buf: Vec<f32>,
+}
+
+const BLOCK_SIZE: usize = 128;
+
+fn midi_to_freq(note: u8) -> f32 {
+    440.0 * 2.0f32.powf((note as f32 - 69.0) / 12.0)
 }
 
 impl Bridge {
     pub fn new(
-        pattern: Pattern,
+        scheduler: Scheduler,
         dsp: DspProcessor,
         cmd_rx: mpsc::Receiver<Command>,
         config: &EngineConfig,
     ) -> Self {
-        let block_samples = pattern.block_size() * config.channels as usize;
+        let block_samples = BLOCK_SIZE * config.channels as usize;
         let ring_capacity = block_samples * 4;
         Self {
-            pattern,
+            scheduler,
             dsp,
             cmd_rx,
             channels: config.channels,
-            block_samples,
+            block_size: BLOCK_SIZE,
             ring: vec![0.0; ring_capacity],
             ring_read: 0,
             ring_avail: 0,
-            glicol_buf: vec![0.0; block_samples],
             faust_buf: vec![0.0; block_samples],
         }
+    }
+
+    pub fn playhead(&self) -> f32 {
+        self.scheduler.playhead()
     }
 
     pub fn fill(&mut self, output: &mut [f32]) {
         while let Ok(cmd) = self.cmd_rx.try_recv() {
             match cmd {
-                Command::UpdatePattern(code) => self.pattern.update_code(&code),
+                Command::SetScore(score) => self.scheduler.set_score(score),
                 Command::SetDspParam(idx, val) => self.dsp.set_param(idx, val),
             }
         }
@@ -66,26 +75,38 @@ impl Bridge {
     }
 
     fn render_block_into_ring(&mut self) {
-        let bs = self.block_samples;
+        let bs = self.block_size;
+        let block_samples = bs * self.channels as usize;
 
-        self.glicol_buf[..bs].fill(0.0);
-        self.pattern.render_interleaved(&mut self.glicol_buf[..bs], self.channels);
+        // Advance scheduler and process events
+        let events = self.scheduler.advance(bs);
+        for event in &events {
+            match &event.kind {
+                EventKind::NoteOn { note } => {
+                    self.dsp.set_param(PARAM_FREQ, midi_to_freq(*note));
+                    self.dsp.set_param(crate::core::dsp::PARAM_GATE, 1.0);
+                }
+                EventKind::NoteOff { .. } => {
+                    self.dsp.set_param(crate::core::dsp::PARAM_GATE, 0.0);
+                }
+            }
+        }
 
-        self.faust_buf[..bs].fill(0.0);
-        self.dsp.render_interleaved(&mut self.faust_buf[..bs], bs / self.channels as usize);
+        // Render Faust
+        self.faust_buf[..block_samples].fill(0.0);
+        self.dsp.render_interleaved(&mut self.faust_buf[..block_samples], bs);
 
-        // Write mixed output to ring in two linear passes (avoids per-sample modulo)
+        // Write to ring
         let write_start = (self.ring_read + self.ring_avail) % self.ring.len();
-        let first_len = bs.min(self.ring.len() - write_start);
-        let second_len = bs - first_len;
+        let first_len = block_samples.min(self.ring.len() - write_start);
+        let second_len = block_samples - first_len;
 
-        for i in 0..first_len {
-            self.ring[write_start + i] = self.glicol_buf[i] + self.faust_buf[i];
-        }
-        for i in 0..second_len {
-            self.ring[i] = self.glicol_buf[first_len + i] + self.faust_buf[first_len + i];
+        self.ring[write_start..write_start + first_len]
+            .copy_from_slice(&self.faust_buf[..first_len]);
+        if second_len > 0 {
+            self.ring[..second_len].copy_from_slice(&self.faust_buf[first_len..block_samples]);
         }
 
-        self.ring_avail += bs;
+        self.ring_avail += block_samples;
     }
 }

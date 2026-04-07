@@ -1,7 +1,8 @@
 pub mod config;
 pub mod dsp;
-pub mod pattern;
+pub mod event;
+pub mod scheduler;
 
 pub use config::EngineConfig;
 pub use dsp::DspProcessor;
-pub use pattern::Pattern;
+pub use scheduler::{EventKind, NoteEvent, SchedulerEvent, Score, Scheduler};

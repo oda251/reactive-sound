@@ -1,4 +1,6 @@
+use crate::core::Score;
+
 pub enum Command {
-    UpdatePattern(String),
+    SetScore(Score),
     SetDspParam(i32, f32),
 }

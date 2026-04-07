@@ -3,13 +3,14 @@ use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use std::sync::mpsc;
 use std::sync::Mutex;
 
-use crate::core::{DspProcessor, EngineConfig, Pattern};
+use crate::core::{DspProcessor, EngineConfig, Score, Scheduler};
 use crate::shell::bridge::Bridge;
 use crate::shell::command::Command;
 
 pub struct AudioOutput {
     _stream: Stream,
     cmd_tx: mpsc::Sender<Command>,
+    playhead: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl AudioOutput {
@@ -18,15 +19,20 @@ impl AudioOutput {
         let stream_config = device.default_output_config()?;
 
         let sample_rate = config.sample_rate_or(stream_config.sample_rate().0);
-        let pattern = Pattern::new(sample_rate);
-        let dsp = DspProcessor::new(sample_rate, pattern.block_size());
+        let dsp = DspProcessor::new(sample_rate, 128);
+        let score = Score::empty(20.0);
+        let scheduler = Scheduler::new(sample_rate, score);
 
         let (cmd_tx, cmd_rx) = mpsc::channel();
-        let bridge = Mutex::new(Bridge::new(pattern, dsp, cmd_rx, config));
+
+        let playhead = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let playhead_writer = playhead.clone();
+
+        let bridge = Mutex::new(Bridge::new(scheduler, dsp, cmd_rx, config));
 
         let stream = match stream_config.sample_format() {
-            SampleFormat::F32 => build_stream_f32(&device, &stream_config.into(), bridge)?,
-            SampleFormat::I16 => build_stream_convert::<i16>(&device, &stream_config.into(), bridge)?,
+            SampleFormat::F32 => build_stream_f32(&device, &stream_config.into(), bridge, playhead_writer)?,
+            SampleFormat::I16 => build_stream_convert::<i16>(&device, &stream_config.into(), bridge, playhead_writer)?,
             fmt => return Err(format!("unsupported sample format: {fmt:?}").into()),
         };
 
@@ -34,11 +40,17 @@ impl AudioOutput {
         Ok(Self {
             _stream: stream,
             cmd_tx,
+            playhead,
         })
     }
 
     pub fn send(&self, cmd: Command) -> Result<(), mpsc::SendError<Command>> {
         self.cmd_tx.send(cmd)
+    }
+
+    /// Read the current playhead position (0.0..1.0) from the audio thread.
+    pub fn playhead(&self) -> f32 {
+        f32::from_bits(self.playhead.load(std::sync::atomic::Ordering::Relaxed) as u32)
     }
 }
 
@@ -48,7 +60,10 @@ fn resolve_device(config: &EngineConfig) -> Result<Device, Box<dyn std::error::E
     if let Some(name) = &config.device_name {
         let devices = host.output_devices()?;
         for d in devices {
-            if d.name().map(|n| n.contains(name.as_str())).unwrap_or(false) {
+            if d.name()
+                .map(|n| n.contains(name.as_str()))
+                .unwrap_or(false)
+            {
                 return Ok(d);
             }
         }
@@ -63,12 +78,17 @@ fn build_stream_f32(
     device: &Device,
     config: &StreamConfig,
     bridge: Mutex<Bridge>,
+    playhead: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> Result<Stream, Box<dyn std::error::Error>> {
     let stream = device.build_output_stream(
         config,
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
             if let Ok(mut br) = bridge.lock() {
                 br.fill(data);
+                playhead.store(
+                    br.playhead().to_bits() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
             }
         },
         |err| log::error!("audio stream error: {err}"),
@@ -77,10 +97,13 @@ fn build_stream_f32(
     Ok(stream)
 }
 
-fn build_stream_convert<T: cpal::Sample + cpal::SizedSample + cpal::FromSample<f32> + Send + 'static>(
+fn build_stream_convert<
+    T: cpal::Sample + cpal::SizedSample + cpal::FromSample<f32> + Send + 'static,
+>(
     device: &Device,
     config: &StreamConfig,
     bridge: Mutex<Bridge>,
+    playhead: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> Result<Stream, Box<dyn std::error::Error>> {
     let mut convert_buf: Vec<f32> = Vec::new();
 
@@ -93,6 +116,10 @@ fn build_stream_convert<T: cpal::Sample + cpal::SizedSample + cpal::FromSample<f
                 for (i, sample) in data.iter_mut().enumerate() {
                     *sample = T::from_sample(convert_buf[i]);
                 }
+                playhead.store(
+                    br.playhead().to_bits() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
             }
         },
         |err| log::error!("audio stream error: {err}"),

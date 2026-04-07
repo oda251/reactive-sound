@@ -4,6 +4,8 @@ mod shell;
 use std::env;
 
 pub use crate::core::dsp::{PARAM_FREQ, PARAM_GAIN, PARAM_GATE};
+pub use crate::core::event::InputEvent;
+pub use crate::core::scheduler::{NoteEvent, Score};
 pub use crate::core::EngineConfig;
 use crate::shell::audio;
 use crate::shell::command::Command;
@@ -22,13 +24,17 @@ impl Engine {
         Ok(Self { audio })
     }
 
-    pub fn update_pattern(&self, code: &str) -> Result<(), EngineError> {
-        self.send(Command::UpdatePattern(code.to_owned()))
+    pub fn set_score(&self, score: Score) -> Result<(), EngineError> {
+        self.send(Command::SetScore(score))
     }
 
-    /// Set a Faust DSP parameter by index. Use PARAM_FREQ, PARAM_GAIN, PARAM_GATE constants.
     pub fn set_synth_param(&self, param: i32, value: f32) -> Result<(), EngineError> {
         self.send(Command::SetDspParam(param, value))
+    }
+
+    /// Read the current playhead position (0.0..1.0) from the audio thread.
+    pub fn playhead(&self) -> f32 {
+        self.audio.playhead()
     }
 
     fn send(&self, cmd: Command) -> Result<(), EngineError> {

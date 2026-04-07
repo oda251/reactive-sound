@@ -7,6 +7,5 @@ edition = "2024"
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
-glicol = "0.13"
 cpal = "0.15"
 log = "0.4"
