@@ -2,17 +2,40 @@ use std::collections::VecDeque;
 
 pub const TICKS_PER_BEAT: u32 = 480;
 
+/// Identifies which Faust DSP to route a note or parameter change to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub struct VoiceType(pub u8);
+
+/// A parameter change. Shared between NoteEvent.overrides and ParamEvent.
+#[derive(Clone, Debug)]
+pub struct ParamValue {
+    pub param: i32,
+    pub value: f32,
+}
+
 #[derive(Clone, Debug)]
 pub struct NoteEvent {
     pub tick: u32,
     pub note: u8,
     pub duration_ticks: u32,
     pub gain: f32,
+    pub voice_type: VoiceType,
+    /// Parameter overrides applied simultaneously with NoteOn (zero latency).
+    pub overrides: Vec<ParamValue>,
+}
+
+/// A standalone parameter change at a specific tick (not tied to a note).
+#[derive(Clone, Debug)]
+pub struct ParamEvent {
+    pub tick: u32,
+    pub voice_type: VoiceType,
+    pub change: ParamValue,
 }
 
 #[derive(Clone, Debug)]
 pub struct PatternSlot {
-    pub events: Vec<NoteEvent>,
+    pub notes: Vec<NoteEvent>,
+    pub params: Vec<ParamEvent>,
     pub total_ticks: u32,
     pub active: bool,
 }
@@ -20,7 +43,8 @@ pub struct PatternSlot {
 impl PatternSlot {
     pub fn empty(total_ticks: u32) -> Self {
         Self {
-            events: Vec::new(),
+            notes: Vec::new(),
+            params: Vec::new(),
             total_ticks,
             active: false,
         }
@@ -33,6 +57,8 @@ pub struct QueuedNote {
     pub note: u8,
     pub duration_samples: u64,
     pub gain: f32,
+    pub voice_type: VoiceType,
+    pub overrides: Vec<ParamValue>,
 }
 
 #[derive(Debug, Clone)]
@@ -43,8 +69,20 @@ pub struct SchedulerEvent {
 
 #[derive(Debug, Clone)]
 pub enum EventKind {
-    NoteOn { note: u8, gain: f32 },
-    NoteOff { note: u8 },
+    NoteOn {
+        note: u8,
+        gain: f32,
+        voice_type: VoiceType,
+        overrides: Vec<ParamValue>,
+    },
+    NoteOff {
+        note: u8,
+        voice_type: VoiceType,
+    },
+    ParamChange {
+        voice_type: VoiceType,
+        change: ParamValue,
+    },
 }
 
 pub struct Scheduler {
@@ -53,10 +91,9 @@ pub struct Scheduler {
     samples_elapsed: u64,
     patterns: Vec<PatternSlot>,
     queue: VecDeque<QueuedNote>,
-    pending_offs: Vec<(u64, u8)>,
-    // Pre-allocated buffers to avoid hot-path allocation
+    pending_offs: Vec<(u64, u8, VoiceType)>,
     event_buf: Vec<SchedulerEvent>,
-    off_buf: Vec<(u64, u8)>,
+    off_buf: Vec<(u64, u8, VoiceType)>,
 }
 
 impl Scheduler {
@@ -97,6 +134,8 @@ impl Scheduler {
             note,
             duration_samples,
             gain,
+            voice_type: VoiceType::default(),
+            overrides: Vec::new(),
         });
     }
 
@@ -115,13 +154,11 @@ impl Scheduler {
         }
     }
 
-    /// Advance the scheduler and call `f` for each event in this block.
     pub fn advance(&mut self, frames: usize, mut f: impl FnMut(&SchedulerEvent)) {
         self.event_buf.clear();
         let block_start = self.samples_elapsed;
         let block_end = block_start + frames as u64;
 
-        // Process patterns
         for pat in &self.patterns {
             if !pat.active || pat.total_ticks == 0 {
                 continue;
@@ -133,7 +170,8 @@ impl Scheduler {
 
             let loop_pos = block_start % loop_samples;
 
-            for note_event in &pat.events {
+            // Notes
+            for note_event in &pat.notes {
                 let note_sample = self.ticks_to_samples(note_event.tick);
 
                 if in_range(note_sample, loop_pos, frames as u64, loop_samples) {
@@ -143,11 +181,30 @@ impl Scheduler {
                         kind: EventKind::NoteOn {
                             note: note_event.note,
                             gain: note_event.gain,
+                            voice_type: note_event.voice_type,
+                            overrides: note_event.overrides.clone(),
                         },
                     });
                     let off_abs =
                         block_start + offset + self.ticks_to_samples(note_event.duration_ticks);
-                    self.pending_offs.push((off_abs, note_event.note));
+                    self.pending_offs
+                        .push((off_abs, note_event.note, note_event.voice_type));
+                }
+            }
+
+            // Param automation
+            for param_event in &pat.params {
+                let param_sample = self.ticks_to_samples(param_event.tick);
+
+                if in_range(param_sample, loop_pos, frames as u64, loop_samples) {
+                    let offset = offset_in_block(param_sample, loop_pos, loop_samples);
+                    self.event_buf.push(SchedulerEvent {
+                        frame_offset: offset as usize,
+                        kind: EventKind::ParamChange {
+                            voice_type: param_event.voice_type,
+                            change: param_event.change.clone(),
+                        },
+                    });
                 }
             }
         }
@@ -164,23 +221,28 @@ impl Scheduler {
                 kind: EventKind::NoteOn {
                     note: queued.note,
                     gain: queued.gain,
+                    voice_type: queued.voice_type,
+                    overrides: queued.overrides,
                 },
             });
             self.pending_offs
-                .push((queued.at_sample + queued.duration_samples, queued.note));
+                .push((queued.at_sample + queued.duration_samples, queued.note, queued.voice_type));
         }
 
-        // Process pending note-offs (swap buffers to avoid allocation)
+        // Pending note-offs
         self.off_buf.clear();
-        for &(off_at, note) in &self.pending_offs {
+        for &(off_at, note, vt) in &self.pending_offs {
             if off_at >= block_start && off_at < block_end {
                 let offset = (off_at - block_start) as usize;
                 self.event_buf.push(SchedulerEvent {
                     frame_offset: offset.min(frames.saturating_sub(1)),
-                    kind: EventKind::NoteOff { note },
+                    kind: EventKind::NoteOff {
+                        note,
+                        voice_type: vt,
+                    },
                 });
             } else if off_at >= block_end {
-                self.off_buf.push((off_at, note));
+                self.off_buf.push((off_at, note, vt));
             }
         }
         std::mem::swap(&mut self.pending_offs, &mut self.off_buf);
@@ -244,12 +306,15 @@ mod tests {
         sched.set_pattern(
             0,
             PatternSlot {
-                events: vec![NoteEvent {
+                notes: vec![NoteEvent {
                     tick: 0,
                     note: 60,
                     duration_ticks: 240,
                     gain: 0.5,
+                    voice_type: VoiceType(0),
+                    overrides: Vec::new(),
                 }],
+                params: Vec::new(),
                 total_ticks: TICKS_PER_BEAT * 4,
                 active: true,
             },
@@ -273,11 +338,12 @@ mod tests {
         sched.set_pattern(
             0,
             PatternSlot {
-                events: vec![
-                    NoteEvent { tick: 0, note: 60, duration_ticks: 240, gain: 0.3 },
-                    NoteEvent { tick: 0, note: 64, duration_ticks: 240, gain: 0.3 },
-                    NoteEvent { tick: 0, note: 67, duration_ticks: 240, gain: 0.3 },
+                notes: vec![
+                    NoteEvent { tick: 0, note: 60, duration_ticks: 240, gain: 0.3, voice_type: VoiceType(0), overrides: Vec::new() },
+                    NoteEvent { tick: 0, note: 64, duration_ticks: 240, gain: 0.3, voice_type: VoiceType(0), overrides: Vec::new() },
+                    NoteEvent { tick: 0, note: 67, duration_ticks: 240, gain: 0.3, voice_type: VoiceType(0), overrides: Vec::new() },
                 ],
+                params: Vec::new(),
                 total_ticks: TICKS_PER_BEAT * 4,
                 active: true,
             },
@@ -288,5 +354,55 @@ mod tests {
             .filter(|e| matches!(e.kind, EventKind::NoteOn { .. }))
             .collect();
         assert_eq!(note_ons.len(), 3);
+    }
+
+    #[test]
+    fn param_event_triggers() {
+        let mut sched = Scheduler::new(48000);
+        sched.set_pattern(
+            0,
+            PatternSlot {
+                notes: Vec::new(),
+                params: vec![ParamEvent {
+                    tick: 0,
+                    voice_type: VoiceType(0),
+                    change: ParamValue { param: 0, value: 880.0 },
+                }],
+                total_ticks: TICKS_PER_BEAT * 4,
+                active: true,
+            },
+        );
+
+        let events = collect_events(&mut sched, 128);
+        assert!(events.iter().any(|e| matches!(e.kind, EventKind::ParamChange { .. })));
+    }
+
+    #[test]
+    fn note_with_overrides() {
+        let mut sched = Scheduler::new(48000);
+        sched.set_pattern(
+            0,
+            PatternSlot {
+                notes: vec![NoteEvent {
+                    tick: 0,
+                    note: 60,
+                    duration_ticks: 240,
+                    gain: 0.5,
+                    voice_type: VoiceType(0),
+                    overrides: vec![ParamValue { param: 1, value: 0.8 }],
+                }],
+                params: Vec::new(),
+                total_ticks: TICKS_PER_BEAT * 4,
+                active: true,
+            },
+        );
+
+        let events = collect_events(&mut sched, 128);
+        let note_on = events.iter().find(|e| matches!(e.kind, EventKind::NoteOn { .. }));
+        assert!(note_on.is_some());
+        if let Some(SchedulerEvent { kind: EventKind::NoteOn { overrides, .. }, .. }) = note_on {
+            assert_eq!(overrides.len(), 1);
+            assert_eq!(overrides[0].param, 1);
+        }
     }
 }

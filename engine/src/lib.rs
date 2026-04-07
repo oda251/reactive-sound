@@ -6,7 +6,10 @@ use std::env;
 pub use crate::core::dsp::{PARAM_FREQ, PARAM_GAIN, PARAM_GATE};
 pub use crate::core::effect::{AccumulativeEffect, ImmediateAction, ImmediateEffect, InputEffect};
 pub use crate::core::event::InputEvent;
-pub use crate::core::scheduler::{EventKind, NoteEvent, PatternSlot, QueuedNote, TICKS_PER_BEAT};
+pub use crate::core::scheduler::{
+    EventKind, NoteEvent, ParamEvent, ParamValue, PatternSlot, QueuedNote, VoiceType,
+    TICKS_PER_BEAT,
+};
 pub use crate::core::EngineConfig;
 use crate::shell::audio;
 use crate::shell::command::Command;

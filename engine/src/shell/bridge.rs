@@ -1,6 +1,7 @@
 use std::sync::mpsc;
 
 use crate::core::effect::ImmediateAction;
+use crate::core::scheduler::ParamValue;
 use crate::core::{DspProcessor, EngineConfig, EventKind, Scheduler};
 use crate::shell::command::Command;
 
@@ -17,6 +18,22 @@ pub struct Bridge {
 }
 
 const BLOCK_SIZE: usize = 128;
+
+/// Pending DSP action collected from scheduler events.
+enum DspAction {
+    NoteOn {
+        note: u8,
+        gain: f32,
+        overrides: Vec<ParamValue>,
+    },
+    NoteOff {
+        note: u8,
+    },
+    ParamChange {
+        param: i32,
+        value: f32,
+    },
+}
 
 impl Bridge {
     pub fn new(
@@ -83,20 +100,47 @@ impl Bridge {
         let bs = self.block_size;
         let block_samples = bs * self.channels as usize;
 
-        // Collect events to avoid borrow conflict (scheduler borrows self, dsp needs self)
-        let mut note_ons: Vec<(u8, f32)> = Vec::new();
-        let mut note_offs: Vec<u8> = Vec::new();
-        self.scheduler.advance(bs, |event| {
-            match &event.kind {
-                EventKind::NoteOn { note, gain } => note_ons.push((*note, *gain)),
-                EventKind::NoteOff { note } => note_offs.push(*note),
-            }
+        // Collect events (scheduler borrows self, dsp needs self)
+        let mut actions: Vec<DspAction> = Vec::new();
+        self.scheduler.advance(bs, |event| match &event.kind {
+            EventKind::NoteOn {
+                note,
+                gain,
+                overrides,
+                ..
+            } => actions.push(DspAction::NoteOn {
+                note: *note,
+                gain: *gain,
+                overrides: overrides.clone(),
+            }),
+            EventKind::NoteOff { note, .. } => actions.push(DspAction::NoteOff { note: *note }),
+            EventKind::ParamChange { change, .. } => actions.push(DspAction::ParamChange {
+                param: change.param,
+                value: change.value,
+            }),
         });
-        for (note, gain) in note_ons {
-            self.dsp.note_on(note, gain);
-        }
-        for note in note_offs {
-            self.dsp.note_off(note);
+
+        // Apply actions
+        for action in &actions {
+            match action {
+                DspAction::NoteOn {
+                    note,
+                    gain,
+                    overrides,
+                } => {
+                    self.dsp.note_on(*note, *gain);
+                    // Apply overrides to the voice that was just allocated
+                    // (note_on returns void but the allocator tracks the latest voice)
+                    for pv in overrides {
+                        // TODO: route to correct voice once multi-DSP is implemented
+                        self.dsp.set_voice_param(0, pv.param, pv.value);
+                    }
+                }
+                DspAction::NoteOff { note } => self.dsp.note_off(*note),
+                DspAction::ParamChange { param, value } => {
+                    self.dsp.set_voice_param(0, *param, *value);
+                }
+            }
         }
 
         self.faust_buf[..block_samples].fill(0.0);

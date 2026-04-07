@@ -1,6 +1,6 @@
 use reactive_bgm_engine::{
-    AccumulativeEffect, ImmediateAction, ImmediateEffect, InputEffect, InputEvent,
-    NoteEvent, PatternSlot, TICKS_PER_BEAT,
+    AccumulativeEffect, ImmediateAction, ImmediateEffect, InputEffect, InputEvent, NoteEvent,
+    PatternSlot, VoiceType, TICKS_PER_BEAT,
 };
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -86,6 +86,8 @@ impl AccumulativeEffect for RhythmAccumulator {
                         note,
                         duration_ticks: NOTE_DURATION_TICKS,
                         gain: 0.25,
+                        voice_type: VoiceType(0),
+                        overrides: Vec::new(),
                     })
                 } else {
                     None
@@ -94,7 +96,8 @@ impl AccumulativeEffect for RhythmAccumulator {
             .collect();
 
         PatternSlot {
-            events,
+            notes: events,
+            params: Vec::new(),
             total_ticks: TOTAL_TICKS,
             active: true,
         }
