@@ -2,11 +2,13 @@ mod input;
 mod raw_rhythm_provider;
 
 use eframe::egui;
-use reactive_bgm_engine::{Engine, InputEvent, ScoreProvider};
+use reactive_bgm_engine::{
+    AccumulativeEffect, Engine, ImmediateEffect, InputEffect, InputEvent,
+};
 use std::sync::mpsc;
 use std::time::Instant;
 
-use raw_rhythm_provider::{RawRhythmProvider, MEASURES};
+use raw_rhythm_provider::{KeyClickEffect, RhythmAccumulator, MEASURES};
 
 fn main() {
     env_logger::init();
@@ -39,7 +41,8 @@ struct App {
     engine: Engine,
     egui_tx: mpsc::Sender<InputEvent>,
     event_rx: mpsc::Receiver<InputEvent>,
-    provider: RawRhythmProvider,
+    accumulator: RhythmAccumulator,
+    click: KeyClickEffect,
     key_count: u64,
     last_update: Option<Instant>,
     note_positions: Vec<f32>,
@@ -55,7 +58,8 @@ impl App {
             engine,
             egui_tx,
             event_rx,
-            provider: RawRhythmProvider::new(),
+            accumulator: RhythmAccumulator::new(),
+            click: KeyClickEffect::new(),
             key_count: 0,
             last_update: None,
             note_positions: Vec::new(),
@@ -71,18 +75,25 @@ impl eframe::App for App {
 
         while let Ok(event) = self.event_rx.try_recv() {
             self.key_count += 1;
-            self.provider.on_event(&event, now);
+            self.accumulator.on_event(&event, now);
+            self.click.on_event(&event, now);
         }
 
+        // Immediate effects → Engine
+        for action in self.click.drain_actions() {
+            let _ = self.engine.send_immediate(action);
+        }
+
+        // Accumulative effects → Engine (periodic)
         let should_update = match self.last_update {
             Some(last) => now.duration_since(last).as_millis() >= UPDATE_INTERVAL_MS,
             None => true,
         };
 
         if should_update {
-            let score = self.provider.score(now);
-            self.note_positions = self.provider.note_positions(now);
-            let _ = self.engine.set_score(score);
+            let pattern = self.accumulator.score(now);
+            self.note_positions = self.accumulator.note_positions(now);
+            let _ = self.engine.set_pattern(0, pattern);
             self.last_update = Some(now);
         }
 
@@ -105,7 +116,7 @@ impl eframe::App for App {
             ui.label("Keys:");
             ui.strong(format!("{}", self.key_count));
             ui.label("  Events:");
-            ui.strong(format!("{}", self.provider.event_count()));
+            ui.strong(format!("{}", self.accumulator.event_count()));
         });
 
         ui.separator();

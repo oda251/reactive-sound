@@ -1,19 +1,25 @@
-use reactive_bgm_engine::{InputEvent, NoteEvent, Score, ScoreProvider};
+use reactive_bgm_engine::{
+    AccumulativeEffect, ImmediateAction, ImmediateEffect, InputEffect, InputEvent,
+    NoteEvent, PatternSlot, TICKS_PER_BEAT,
+};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-const LOOP_DURATION_SECS: f32 = 20.0;
+const LOOP_BEATS: u32 = 40; // 10 measures * 4 beats
+const TOTAL_TICKS: u32 = TICKS_PER_BEAT * LOOP_BEATS;
 const WINDOW: Duration = Duration::from_secs(20);
-const NOTE_DURATION: f32 = 0.08;
+const NOTE_DURATION_TICKS: u32 = TICKS_PER_BEAT / 4; // sixteenth note
 const HIT_NOTES: [u8; 4] = [60, 67, 72, 63];
 
 pub const MEASURES: usize = 10;
 
-pub struct RawRhythmProvider {
+// --- AccumulativeEffect ---
+
+pub struct RhythmAccumulator {
     timestamps: VecDeque<Instant>,
 }
 
-impl RawRhythmProvider {
+impl RhythmAccumulator {
     pub fn new() -> Self {
         Self {
             timestamps: VecDeque::new(),
@@ -24,19 +30,15 @@ impl RawRhythmProvider {
         self.timestamps.len()
     }
 
-    /// Committed note positions for GUI display (0.0..1.0 in loop).
+    /// Note positions as 0.0..1.0 for GUI display.
     pub fn note_positions(&self, now: Instant) -> Vec<f32> {
         let window_start = now.checked_sub(WINDOW).unwrap_or(now);
         self.timestamps
             .iter()
             .filter_map(|&ts| {
                 let offset = ts.checked_duration_since(window_start)?;
-                let pos = offset.as_secs_f32() / LOOP_DURATION_SECS;
-                if (0.0..1.0).contains(&pos) {
-                    Some(pos)
-                } else {
-                    None
-                }
+                let pos = offset.as_secs_f32() / WINDOW.as_secs_f32();
+                if (0.0..1.0).contains(&pos) { Some(pos) } else { None }
             })
             .collect()
     }
@@ -53,7 +55,7 @@ impl RawRhythmProvider {
     }
 }
 
-impl ScoreProvider for RawRhythmProvider {
+impl InputEffect for RhythmAccumulator {
     fn on_event(&mut self, event: &InputEvent, now: Instant) {
         match event {
             InputEvent::KeyPress { timestamp } => {
@@ -62,23 +64,28 @@ impl ScoreProvider for RawRhythmProvider {
         }
         self.prune(now);
     }
+}
 
-    fn score(&self, now: Instant) -> Score {
+impl AccumulativeEffect for RhythmAccumulator {
+    fn score(&self, now: Instant) -> PatternSlot {
         let window_start = now.checked_sub(WINDOW).unwrap_or(now);
 
         let mut hit_idx = 0;
-        let events = self.timestamps
+        let events = self
+            .timestamps
             .iter()
             .filter_map(|&ts| {
                 let offset = ts.checked_duration_since(window_start)?;
-                let pos = offset.as_secs_f32() / LOOP_DURATION_SECS;
+                let pos = offset.as_secs_f32() / WINDOW.as_secs_f32();
                 if (0.0..1.0).contains(&pos) {
+                    let tick = (pos * TOTAL_TICKS as f32) as u32;
                     let note = HIT_NOTES[hit_idx % HIT_NOTES.len()];
                     hit_idx += 1;
                     Some(NoteEvent {
-                        position: pos,
+                        tick,
                         note,
-                        duration: NOTE_DURATION,
+                        duration_ticks: NOTE_DURATION_TICKS,
+                        gain: 0.25,
                     })
                 } else {
                     None
@@ -86,9 +93,43 @@ impl ScoreProvider for RawRhythmProvider {
             })
             .collect();
 
-        Score {
+        PatternSlot {
             events,
-            loop_duration_secs: LOOP_DURATION_SECS,
+            total_ticks: TOTAL_TICKS,
+            active: true,
         }
+    }
+}
+
+// --- ImmediateEffect ---
+
+pub struct KeyClickEffect {
+    pending: Vec<ImmediateAction>,
+}
+
+impl KeyClickEffect {
+    pub fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+        }
+    }
+}
+
+impl InputEffect for KeyClickEffect {
+    fn on_event(&mut self, event: &InputEvent, _now: Instant) {
+        match event {
+            InputEvent::KeyPress { .. } => {
+                self.pending.push(ImmediateAction::NoteOn {
+                    note: 80,
+                    gain: 0.1,
+                });
+            }
+        }
+    }
+}
+
+impl ImmediateEffect for KeyClickEffect {
+    fn drain_actions(&mut self) -> Vec<ImmediateAction> {
+        std::mem::take(&mut self.pending)
     }
 }

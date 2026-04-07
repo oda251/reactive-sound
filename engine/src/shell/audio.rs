@@ -1,16 +1,16 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
-use std::sync::mpsc;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 
-use crate::core::{DspProcessor, EngineConfig, Score, Scheduler};
+use crate::core::{DspProcessor, EngineConfig, Scheduler};
 use crate::shell::bridge::Bridge;
 use crate::shell::command::Command;
 
 pub struct AudioOutput {
     _stream: Stream,
     cmd_tx: mpsc::Sender<Command>,
-    playhead: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    playhead: Arc<AtomicU64>,
 }
 
 impl AudioOutput {
@@ -20,19 +20,22 @@ impl AudioOutput {
 
         let sample_rate = config.sample_rate_or(stream_config.sample_rate().0);
         let dsp = DspProcessor::new(sample_rate, 128);
-        let score = Score::empty(20.0);
-        let scheduler = Scheduler::new(sample_rate, score);
+        let scheduler = Scheduler::new(sample_rate);
 
         let (cmd_tx, cmd_rx) = mpsc::channel();
 
-        let playhead = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let playhead = Arc::new(AtomicU64::new(0));
         let playhead_writer = playhead.clone();
 
         let bridge = Mutex::new(Bridge::new(scheduler, dsp, cmd_rx, config));
 
         let stream = match stream_config.sample_format() {
-            SampleFormat::F32 => build_stream_f32(&device, &stream_config.into(), bridge, playhead_writer)?,
-            SampleFormat::I16 => build_stream_convert::<i16>(&device, &stream_config.into(), bridge, playhead_writer)?,
+            SampleFormat::F32 => {
+                build_stream_f32(&device, &stream_config.into(), bridge, playhead_writer)?
+            }
+            SampleFormat::I16 => {
+                build_stream_convert::<i16>(&device, &stream_config.into(), bridge, playhead_writer)?
+            }
             fmt => return Err(format!("unsupported sample format: {fmt:?}").into()),
         };
 
@@ -48,9 +51,8 @@ impl AudioOutput {
         self.cmd_tx.send(cmd)
     }
 
-    /// Read the current playhead position (0.0..1.0) from the audio thread.
     pub fn playhead(&self) -> f32 {
-        f32::from_bits(self.playhead.load(std::sync::atomic::Ordering::Relaxed) as u32)
+        f32::from_bits(self.playhead.load(Ordering::Relaxed) as u32)
     }
 }
 
@@ -78,7 +80,7 @@ fn build_stream_f32(
     device: &Device,
     config: &StreamConfig,
     bridge: Mutex<Bridge>,
-    playhead: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    playhead: Arc<AtomicU64>,
 ) -> Result<Stream, Box<dyn std::error::Error>> {
     let stream = device.build_output_stream(
         config,
@@ -86,8 +88,8 @@ fn build_stream_f32(
             if let Ok(mut br) = bridge.lock() {
                 br.fill(data);
                 playhead.store(
-                    br.playhead().to_bits() as u64,
-                    std::sync::atomic::Ordering::Relaxed,
+                    br.playhead(0).to_bits() as u64,
+                    Ordering::Relaxed,
                 );
             }
         },
@@ -103,7 +105,7 @@ fn build_stream_convert<
     device: &Device,
     config: &StreamConfig,
     bridge: Mutex<Bridge>,
-    playhead: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    playhead: Arc<AtomicU64>,
 ) -> Result<Stream, Box<dyn std::error::Error>> {
     let mut convert_buf: Vec<f32> = Vec::new();
 
@@ -117,8 +119,8 @@ fn build_stream_convert<
                     *sample = T::from_sample(convert_buf[i]);
                 }
                 playhead.store(
-                    br.playhead().to_bits() as u64,
-                    std::sync::atomic::Ordering::Relaxed,
+                    br.playhead(0).to_bits() as u64,
+                    Ordering::Relaxed,
                 );
             }
         },

@@ -1,6 +1,6 @@
 use std::sync::mpsc;
 
-use crate::core::dsp::PARAM_FREQ;
+use crate::core::effect::ImmediateAction;
 use crate::core::{DspProcessor, EngineConfig, EventKind, Scheduler};
 use crate::shell::command::Command;
 
@@ -17,10 +17,6 @@ pub struct Bridge {
 }
 
 const BLOCK_SIZE: usize = 128;
-
-fn midi_to_freq(note: u8) -> f32 {
-    440.0 * 2.0f32.powf((note as f32 - 69.0) / 12.0)
-}
 
 impl Bridge {
     pub fn new(
@@ -44,15 +40,16 @@ impl Bridge {
         }
     }
 
-    pub fn playhead(&self) -> f32 {
-        self.scheduler.playhead()
+    pub fn playhead(&self, pattern_index: usize) -> f32 {
+        self.scheduler.playhead(pattern_index)
     }
 
     pub fn fill(&mut self, output: &mut [f32]) {
         while let Ok(cmd) = self.cmd_rx.try_recv() {
             match cmd {
-                Command::SetScore(score) => self.scheduler.set_score(score),
-                Command::SetDspParam(idx, val) => self.dsp.set_param(idx, val),
+                Command::SetPattern(idx, slot) => self.scheduler.set_pattern(idx, slot),
+                Command::Enqueue(note) => self.scheduler.enqueue(note),
+                Command::Immediate(action) => self.apply_immediate(action),
             }
         }
 
@@ -74,29 +71,29 @@ impl Bridge {
         }
     }
 
+    fn apply_immediate(&mut self, action: ImmediateAction) {
+        match action {
+            ImmediateAction::NoteOn { note, gain } => self.dsp.note_on(note, gain),
+            ImmediateAction::NoteOff { note } => self.dsp.note_off(note),
+            ImmediateAction::SetParam(idx, val) => self.dsp.set_voice_param(0, idx, val),
+        }
+    }
+
     fn render_block_into_ring(&mut self) {
         let bs = self.block_size;
         let block_samples = bs * self.channels as usize;
 
-        // Advance scheduler and process events
         let events = self.scheduler.advance(bs);
         for event in &events {
             match &event.kind {
-                EventKind::NoteOn { note } => {
-                    self.dsp.set_param(PARAM_FREQ, midi_to_freq(*note));
-                    self.dsp.set_param(crate::core::dsp::PARAM_GATE, 1.0);
-                }
-                EventKind::NoteOff { .. } => {
-                    self.dsp.set_param(crate::core::dsp::PARAM_GATE, 0.0);
-                }
+                EventKind::NoteOn { note, gain } => self.dsp.note_on(*note, *gain),
+                EventKind::NoteOff { note } => self.dsp.note_off(*note),
             }
         }
 
-        // Render Faust
         self.faust_buf[..block_samples].fill(0.0);
         self.dsp.render_interleaved(&mut self.faust_buf[..block_samples], bs);
 
-        // Write to ring
         let write_start = (self.ring_read + self.ring_avail) % self.ring.len();
         let first_len = block_samples.min(self.ring.len() - write_start);
         let second_len = block_samples - first_len;

@@ -4,8 +4,9 @@ mod shell;
 use std::env;
 
 pub use crate::core::dsp::{PARAM_FREQ, PARAM_GAIN, PARAM_GATE};
+pub use crate::core::effect::{AccumulativeEffect, ImmediateAction, ImmediateEffect, InputEffect};
 pub use crate::core::event::InputEvent;
-pub use crate::core::scheduler::{NoteEvent, Score};
+pub use crate::core::scheduler::{EventKind, NoteEvent, PatternSlot, QueuedNote, TICKS_PER_BEAT};
 pub use crate::core::score_provider::ScoreProvider;
 pub use crate::core::EngineConfig;
 use crate::shell::audio;
@@ -25,15 +26,18 @@ impl Engine {
         Ok(Self { audio })
     }
 
-    pub fn set_score(&self, score: Score) -> Result<(), EngineError> {
-        self.send(Command::SetScore(score))
+    pub fn set_pattern(&self, index: usize, slot: PatternSlot) -> Result<(), EngineError> {
+        self.send(Command::SetPattern(index, slot))
     }
 
-    pub fn set_synth_param(&self, param: i32, value: f32) -> Result<(), EngineError> {
-        self.send(Command::SetDspParam(param, value))
+    pub fn enqueue(&self, note: QueuedNote) -> Result<(), EngineError> {
+        self.send(Command::Enqueue(note))
     }
 
-    /// Read the current playhead position (0.0..1.0) from the audio thread.
+    pub fn send_immediate(&self, action: ImmediateAction) -> Result<(), EngineError> {
+        self.send(Command::Immediate(action))
+    }
+
     pub fn playhead(&self) -> f32 {
         self.audio.playhead()
     }

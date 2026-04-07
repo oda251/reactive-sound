@@ -1,6 +1,8 @@
-use crate::core::Score;
+use crate::core::effect::ImmediateAction;
+use crate::core::scheduler::{PatternSlot, QueuedNote};
 
 pub enum Command {
-    SetScore(Score),
-    SetDspParam(i32, f32),
+    SetPattern(usize, PatternSlot),
+    Enqueue(QueuedNote),
+    Immediate(ImmediateAction),
 }
