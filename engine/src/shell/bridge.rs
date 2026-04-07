@@ -5,10 +5,35 @@ use crate::core::scheduler::ParamValue;
 use crate::core::{DspProcessor, EngineConfig, EventKind, Scheduler};
 use crate::shell::command::Command;
 
+/// Pre-allocated buffers for collecting scheduler events.
+/// Extracted as a separate struct to avoid borrow conflicts with Scheduler.
+struct EventCollector {
+    note_ons: Vec<(u8, f32, Vec<ParamValue>)>,
+    note_offs: Vec<u8>,
+    param_changes: Vec<ParamValue>,
+}
+
+impl EventCollector {
+    fn new() -> Self {
+        Self {
+            note_ons: Vec::with_capacity(16),
+            note_offs: Vec::with_capacity(16),
+            param_changes: Vec::with_capacity(16),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.note_ons.clear();
+        self.note_offs.clear();
+        self.param_changes.clear();
+    }
+}
+
 pub struct Bridge {
     scheduler: Scheduler,
     dsp: DspProcessor,
     cmd_rx: mpsc::Receiver<Command>,
+    collector: EventCollector,
     channels: u16,
     block_size: usize,
     ring: Vec<f32>,
@@ -32,6 +57,7 @@ impl Bridge {
             scheduler,
             dsp,
             cmd_rx,
+            collector: EventCollector::new(),
             channels: config.channels,
             block_size: BLOCK_SIZE,
             ring: vec![0.0; ring_capacity],
@@ -86,34 +112,32 @@ impl Bridge {
         let bs = self.block_size;
         let block_samples = bs * self.channels as usize;
 
-        // Collect events into small vecs to break the borrow on self.scheduler
-        let mut note_ons: Vec<(u8, f32, Vec<ParamValue>)> = Vec::new();
-        let mut note_offs: Vec<u8> = Vec::new();
-        let mut param_changes: Vec<ParamValue> = Vec::new();
-
+        // Collect events using separate struct to avoid borrow conflict
+        let collector = &mut self.collector;
+        collector.clear();
         self.scheduler.advance(bs, |event| match &event.kind {
             EventKind::NoteOn {
                 note,
                 gain,
                 overrides,
                 ..
-            } => note_ons.push((*note, *gain, overrides.clone())),
-            EventKind::NoteOff { note, .. } => note_offs.push(*note),
-            EventKind::ParamChange { change, .. } => param_changes.push(change.clone()),
+            } => collector.note_ons.push((*note, *gain, overrides.clone())),
+            EventKind::NoteOff { note, .. } => collector.note_offs.push(*note),
+            EventKind::ParamChange { change, .. } => {
+                collector.param_changes.push(change.clone())
+            }
         });
 
-        for (note, gain, overrides) in &note_ons {
+        for (note, gain, overrides) in &self.collector.note_ons {
             let voice_idx = self.dsp.note_on(*note, *gain);
             for pv in overrides {
                 self.dsp.set_voice_param(voice_idx, pv.param, pv.value);
             }
         }
-        for note in &note_offs {
+        for note in &self.collector.note_offs {
             self.dsp.note_off(*note);
         }
-        for pv in &param_changes {
-            // Global param changes apply to voice 0 for now
-            // TODO: route via VoiceType when multi-DSP is implemented
+        for pv in &self.collector.param_changes {
             self.dsp.set_voice_param(0, pv.param, pv.value);
         }
 
