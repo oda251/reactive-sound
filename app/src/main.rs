@@ -1,14 +1,12 @@
 mod input;
-mod interpreter;
-mod recorder;
+mod raw_rhythm_provider;
 
 use eframe::egui;
-use reactive_bgm_engine::{Engine, InputEvent};
+use reactive_bgm_engine::{Engine, InputEvent, ScoreProvider};
 use std::sync::mpsc;
 use std::time::Instant;
 
-use interpreter::{Interpreter, RawRhythmInterpreter, LOOP_DURATION_SECS, MEASURES};
-use recorder::Recorder;
+use raw_rhythm_provider::{RawRhythmProvider, MEASURES};
 
 fn main() {
     env_logger::init();
@@ -41,11 +39,9 @@ struct App {
     engine: Engine,
     egui_tx: mpsc::Sender<InputEvent>,
     event_rx: mpsc::Receiver<InputEvent>,
-    recorder: Recorder,
-    interpreter: RawRhythmInterpreter,
+    provider: RawRhythmProvider,
     key_count: u64,
     last_update: Option<Instant>,
-    /// Committed note positions (0.0..1.0) for GUI display.
     note_positions: Vec<f32>,
 }
 
@@ -59,8 +55,7 @@ impl App {
             engine,
             egui_tx,
             event_rx,
-            recorder: Recorder::new(),
-            interpreter: RawRhythmInterpreter,
+            provider: RawRhythmProvider::new(),
             key_count: 0,
             last_update: None,
             note_positions: Vec::new(),
@@ -76,7 +71,7 @@ impl eframe::App for App {
 
         while let Ok(event) = self.event_rx.try_recv() {
             self.key_count += 1;
-            self.recorder.record(&event, now);
+            self.provider.on_event(&event, now);
         }
 
         let should_update = match self.last_update {
@@ -85,18 +80,16 @@ impl eframe::App for App {
         };
 
         if should_update {
-            let score = self.interpreter.interpret(self.recorder.timestamps(), now);
-            self.note_positions = score.events.iter().map(|e| e.position).collect();
+            let score = self.provider.score(now);
+            self.note_positions = self.provider.note_positions(now);
             let _ = self.engine.set_score(score);
             self.last_update = Some(now);
         }
 
-        // Playhead from the audio thread — single source of truth
         let playhead = self.engine.playhead();
         let current_measure = ((playhead * MEASURES as f32) as usize).min(MEASURES - 1);
         let measure_playhead = (playhead * MEASURES as f32).fract();
 
-        // Split note positions into per-measure buckets
         let mut measure_events: Vec<Vec<f32>> = vec![Vec::new(); MEASURES];
         for &pos in &self.note_positions {
             let m = ((pos * MEASURES as f32) as usize).min(MEASURES - 1);
@@ -112,7 +105,7 @@ impl eframe::App for App {
             ui.label("Keys:");
             ui.strong(format!("{}", self.key_count));
             ui.label("  Events:");
-            ui.strong(format!("{}", self.recorder.event_count()));
+            ui.strong(format!("{}", self.provider.event_count()));
         });
 
         ui.separator();
@@ -141,7 +134,6 @@ impl eframe::App for App {
                 };
                 ui.painter().rect_filled(rect, 2.0, bg);
 
-                // Beat lines
                 for beat in 1..4 {
                     let x = rect.min.x + lane_width * (beat as f32 / 4.0);
                     ui.painter().line_segment(
@@ -150,7 +142,6 @@ impl eframe::App for App {
                     );
                 }
 
-                // Note markers
                 for &event_pos in &measure_events[m] {
                     let x = rect.min.x + lane_width * event_pos;
                     let note_rect = egui::Rect::from_min_size(
@@ -174,7 +165,6 @@ impl eframe::App for App {
                     ui.painter().rect_filled(note_rect, 1.0, color);
                 }
 
-                // Playhead in current measure
                 if is_playing {
                     let ph_x = rect.min.x + lane_width * measure_playhead;
                     ui.painter().line_segment(

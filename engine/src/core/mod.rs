@@ -2,6 +2,7 @@ pub mod config;
 pub mod dsp;
 pub mod event;
 pub mod scheduler;
+pub mod score_provider;
 
 pub use config::EngineConfig;
 pub use dsp::DspProcessor;

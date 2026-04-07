@@ -6,6 +6,7 @@ use std::env;
 pub use crate::core::dsp::{PARAM_FREQ, PARAM_GAIN, PARAM_GATE};
 pub use crate::core::event::InputEvent;
 pub use crate::core::scheduler::{NoteEvent, Score};
+pub use crate::core::score_provider::ScoreProvider;
 pub use crate::core::EngineConfig;
 use crate::shell::audio;
 use crate::shell::command::Command;
