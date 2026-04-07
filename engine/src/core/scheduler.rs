@@ -55,7 +55,7 @@ pub struct Scheduler {
     queue: VecDeque<QueuedNote>,
     pending_offs: Vec<(u64, u8)>,
     // Pre-allocated buffers to avoid hot-path allocation
-    pub(crate) event_buf: Vec<SchedulerEvent>,
+    event_buf: Vec<SchedulerEvent>,
     off_buf: Vec<(u64, u8)>,
 }
 
@@ -115,7 +115,8 @@ impl Scheduler {
         }
     }
 
-    pub fn advance(&mut self, frames: usize) -> &[SchedulerEvent] {
+    /// Advance the scheduler and call `f` for each event in this block.
+    pub fn advance(&mut self, frames: usize, mut f: impl FnMut(&SchedulerEvent)) {
         self.event_buf.clear();
         let block_start = self.samples_elapsed;
         let block_end = block_start + frames as u64;
@@ -186,7 +187,9 @@ impl Scheduler {
 
         self.samples_elapsed += frames as u64;
         self.event_buf.sort_by_key(|e| e.frame_offset);
-        &self.event_buf
+        for event in &self.event_buf {
+            f(event);
+        }
     }
 
     #[allow(dead_code)]
@@ -222,10 +225,16 @@ fn offset_in_block(sample: u64, loop_pos: u64, loop_len: u64) -> u64 {
 mod tests {
     use super::*;
 
+    fn collect_events(sched: &mut Scheduler, frames: usize) -> Vec<SchedulerEvent> {
+        let mut out = Vec::new();
+        sched.advance(frames, |e| out.push(e.clone()));
+        out
+    }
+
     #[test]
     fn empty_scheduler_produces_no_events() {
         let mut sched = Scheduler::new(48000);
-        let events = sched.advance(128);
+        let events = collect_events(&mut sched, 128);
         assert!(events.is_empty());
     }
 
@@ -246,20 +255,16 @@ mod tests {
             },
         );
 
-        let events = sched.advance(128);
-        assert!(events
-            .iter()
-            .any(|e| matches!(e.kind, EventKind::NoteOn { note: 60, .. })));
+        let events = collect_events(&mut sched, 128);
+        assert!(events.iter().any(|e| matches!(e.kind, EventKind::NoteOn { note: 60, .. })));
     }
 
     #[test]
     fn queue_triggers_immediately() {
         let mut sched = Scheduler::new(48000);
         sched.enqueue_now(72, 4800, 0.3);
-        let events = sched.advance(128);
-        assert!(events
-            .iter()
-            .any(|e| matches!(e.kind, EventKind::NoteOn { note: 72, .. })));
+        let events = collect_events(&mut sched, 128);
+        assert!(events.iter().any(|e| matches!(e.kind, EventKind::NoteOn { note: 72, .. })));
     }
 
     #[test]
@@ -278,9 +283,8 @@ mod tests {
             },
         );
 
-        let events = sched.advance(128);
-        let note_ons: Vec<_> = events
-            .iter()
+        let events = collect_events(&mut sched, 128);
+        let note_ons: Vec<_> = events.iter()
             .filter(|e| matches!(e.kind, EventKind::NoteOn { .. }))
             .collect();
         assert_eq!(note_ons.len(), 3);

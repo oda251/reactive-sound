@@ -83,19 +83,20 @@ impl Bridge {
         let bs = self.block_size;
         let block_samples = bs * self.channels as usize;
 
-        // advance() returns a slice borrowing scheduler, so collect indices first
-        let event_count = {
-            let events = self.scheduler.advance(bs);
-            events.len()
-        };
-        // Re-borrow to process (events are still in scheduler's event_buf)
-        for i in 0..event_count {
-            // Safety: event_buf is not modified between advance and here
-            let kind = self.scheduler.event_buf[i].kind.clone();
-            match kind {
-                EventKind::NoteOn { note, gain } => self.dsp.note_on(note, gain),
-                EventKind::NoteOff { note } => self.dsp.note_off(note),
+        // Collect events to avoid borrow conflict (scheduler borrows self, dsp needs self)
+        let mut note_ons: Vec<(u8, f32)> = Vec::new();
+        let mut note_offs: Vec<u8> = Vec::new();
+        self.scheduler.advance(bs, |event| {
+            match &event.kind {
+                EventKind::NoteOn { note, gain } => note_ons.push((*note, *gain)),
+                EventKind::NoteOff { note } => note_offs.push(*note),
             }
+        });
+        for (note, gain) in note_ons {
+            self.dsp.note_on(note, gain);
+        }
+        for note in note_offs {
+            self.dsp.note_off(note);
         }
 
         self.faust_buf[..block_samples].fill(0.0);

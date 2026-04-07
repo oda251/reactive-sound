@@ -54,7 +54,8 @@ impl VoiceAllocator {
     pub fn note_off(&mut self, note: u8) -> Option<usize> {
         if let Some(idx) = self.voices.iter().position(|v| v.note == Some(note)) {
             self.voices[idx].note = None;
-            self.voices[idx].active = false;
+            // Keep active=true so the Faust ADSR release phase can complete.
+            // The voice will be marked inactive when reused by note_on.
             Some(idx)
         } else {
             None
