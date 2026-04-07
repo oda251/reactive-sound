@@ -16,8 +16,6 @@ use faust_generated::*;
 pub const PARAM_FREQ: i32 = 0;
 pub const PARAM_GAIN: i32 = 1;
 pub const PARAM_GATE: i32 = 2;
-const PARAMS_PER_VOICE: usize = 3;
-
 use crate::core::voice::VoiceAllocator;
 
 pub struct DspProcessor {
@@ -84,8 +82,11 @@ impl DspProcessor {
         self.mix_buf[0][..frames].fill(0.0);
         self.mix_buf[1][..frames].fill(0.0);
 
-        // Render each voice and sum into mix buffer
+        // Render only active voices
         for (i, synth) in self.voices.iter_mut().enumerate() {
+            if !self.allocator.is_active(i) {
+                continue;
+            }
             let [b0, b1] = &mut self.voice_bufs[i];
             b0[..frames].fill(0.0);
             b1[..frames].fill(0.0);

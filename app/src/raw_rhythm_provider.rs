@@ -119,10 +119,14 @@ impl InputEffect for KeyClickEffect {
     fn on_event(&mut self, event: &InputEvent, _now: Instant) {
         match event {
             InputEvent::KeyPress { .. } => {
+                // Short click: NoteOn followed by NoteOff after a brief moment.
+                // The NoteOff is handled by the engine's scheduler via the
+                // Faust ADSR envelope (gate off triggers release).
                 self.pending.push(ImmediateAction::NoteOn {
                     note: 80,
                     gain: 0.1,
                 });
+                self.pending.push(ImmediateAction::NoteOff { note: 80 });
             }
         }
     }

@@ -4,6 +4,7 @@ const MAX_VOICES: usize = 8;
 struct Voice {
     note: Option<u8>,
     age: u64,
+    active: bool,
 }
 
 pub struct VoiceAllocator {
@@ -14,7 +15,7 @@ pub struct VoiceAllocator {
 impl VoiceAllocator {
     pub fn new() -> Self {
         Self {
-            voices: [Voice { note: None, age: 0 }; MAX_VOICES],
+            voices: [Voice { note: None, age: 0, active: false }; MAX_VOICES],
             counter: 0,
         }
     }
@@ -30,23 +31,22 @@ impl VoiceAllocator {
         // Reuse voice already playing this note
         if let Some(idx) = self.voices.iter().position(|v| v.note == Some(note)) {
             self.voices[idx].age = self.counter;
+            self.voices[idx].active = true;
             return idx;
         }
 
-        // Find a free voice
         if let Some(idx) = self.voices.iter().position(|v| v.note.is_none()) {
-            self.voices[idx] = Voice { note: Some(note), age: self.counter };
+            self.voices[idx] = Voice { note: Some(note), age: self.counter, active: true };
             return idx;
         }
 
-        // Steal the oldest voice
         let idx = self.voices
             .iter()
             .enumerate()
             .min_by_key(|(_, v)| v.age)
             .map(|(i, _)| i)
             .unwrap_or(0);
-        self.voices[idx] = Voice { note: Some(note), age: self.counter };
+        self.voices[idx] = Voice { note: Some(note), age: self.counter, active: true };
         idx
     }
 
@@ -54,10 +54,15 @@ impl VoiceAllocator {
     pub fn note_off(&mut self, note: u8) -> Option<usize> {
         if let Some(idx) = self.voices.iter().position(|v| v.note == Some(note)) {
             self.voices[idx].note = None;
+            self.voices[idx].active = false;
             Some(idx)
         } else {
             None
         }
+    }
+
+    pub fn is_active(&self, idx: usize) -> bool {
+        idx < MAX_VOICES && self.voices[idx].active
     }
 }
 

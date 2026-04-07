@@ -2,9 +2,7 @@ mod input;
 mod raw_rhythm_provider;
 
 use eframe::egui;
-use reactive_bgm_engine::{
-    AccumulativeEffect, Engine, ImmediateEffect, InputEffect, InputEvent,
-};
+use reactive_bgm_engine::{AccumulativeEffect, Engine, ImmediateEffect, InputEffect, InputEvent};
 use std::sync::mpsc;
 use std::time::Instant;
 

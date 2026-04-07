@@ -27,7 +27,6 @@ impl PatternSlot {
     }
 }
 
-/// A one-shot scheduled note at an absolute sample time.
 #[derive(Clone, Debug)]
 pub struct QueuedNote {
     pub at_sample: u64,
@@ -50,29 +49,39 @@ pub enum EventKind {
 
 pub struct Scheduler {
     sample_rate: u32,
+    bpm: f64,
     samples_elapsed: u64,
-    // Pattern-based (looping)
     patterns: Vec<PatternSlot>,
-    // Queue-based (one-shot)
     queue: VecDeque<QueuedNote>,
-    // Pending note-offs from patterns
-    pending_offs: Vec<(u64, u8)>, // (absolute sample, note)
+    pending_offs: Vec<(u64, u8)>,
+    // Pre-allocated buffers to avoid hot-path allocation
+    pub(crate) event_buf: Vec<SchedulerEvent>,
+    off_buf: Vec<(u64, u8)>,
 }
 
 impl Scheduler {
     pub fn new(sample_rate: u32) -> Self {
         Self {
             sample_rate,
+            bpm: 120.0,
             samples_elapsed: 0,
             patterns: Vec::new(),
             queue: VecDeque::new(),
-            pending_offs: Vec::new(),
+            pending_offs: Vec::with_capacity(64),
+            event_buf: Vec::with_capacity(64),
+            off_buf: Vec::with_capacity(64),
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn set_bpm(&mut self, bpm: f64) {
+        self.bpm = bpm;
     }
 
     pub fn set_pattern(&mut self, index: usize, slot: PatternSlot) {
         if index >= self.patterns.len() {
-            self.patterns.resize_with(index + 1, || PatternSlot::empty(TICKS_PER_BEAT * 4));
+            self.patterns
+                .resize_with(index + 1, || PatternSlot::empty(TICKS_PER_BEAT * 4));
         }
         self.patterns[index] = slot;
     }
@@ -81,7 +90,7 @@ impl Scheduler {
         self.queue.push_back(note);
     }
 
-    /// Enqueue a note to play immediately (at current sample position).
+    #[allow(dead_code)]
     pub fn enqueue_now(&mut self, note: u8, duration_samples: u64, gain: f32) {
         self.queue.push_back(QueuedNote {
             at_sample: self.samples_elapsed,
@@ -106,8 +115,8 @@ impl Scheduler {
         }
     }
 
-    pub fn advance(&mut self, frames: usize) -> Vec<SchedulerEvent> {
-        let mut events = Vec::new();
+    pub fn advance(&mut self, frames: usize) -> &[SchedulerEvent] {
+        self.event_buf.clear();
         let block_start = self.samples_elapsed;
         let block_end = block_start + frames as u64;
 
@@ -125,20 +134,18 @@ impl Scheduler {
 
             for note_event in &pat.events {
                 let note_sample = self.ticks_to_samples(note_event.tick);
-                let note_off_sample = note_sample + self.ticks_to_samples(note_event.duration_ticks);
 
-                // Note-on
                 if in_range(note_sample, loop_pos, frames as u64, loop_samples) {
                     let offset = offset_in_block(note_sample, loop_pos, loop_samples);
-                    events.push(SchedulerEvent {
+                    self.event_buf.push(SchedulerEvent {
                         frame_offset: offset as usize,
                         kind: EventKind::NoteOn {
                             note: note_event.note,
                             gain: note_event.gain,
                         },
                     });
-                    // Schedule note-off
-                    let off_abs = block_start + offset + self.ticks_to_samples(note_event.duration_ticks);
+                    let off_abs =
+                        block_start + offset + self.ticks_to_samples(note_event.duration_ticks);
                     self.pending_offs.push((off_abs, note_event.note));
                 }
             }
@@ -151,47 +158,45 @@ impl Scheduler {
             }
             let queued = self.queue.pop_front().unwrap();
             let offset = queued.at_sample.saturating_sub(block_start) as usize;
-            events.push(SchedulerEvent {
+            self.event_buf.push(SchedulerEvent {
                 frame_offset: offset.min(frames.saturating_sub(1)),
                 kind: EventKind::NoteOn {
                     note: queued.note,
                     gain: queued.gain,
                 },
             });
-            self.pending_offs.push((queued.at_sample + queued.duration_samples, queued.note));
+            self.pending_offs
+                .push((queued.at_sample + queued.duration_samples, queued.note));
         }
 
-        // Process pending note-offs
-        let mut remaining_offs = Vec::new();
-        for (off_at, note) in self.pending_offs.drain(..) {
+        // Process pending note-offs (swap buffers to avoid allocation)
+        self.off_buf.clear();
+        for &(off_at, note) in &self.pending_offs {
             if off_at >= block_start && off_at < block_end {
                 let offset = (off_at - block_start) as usize;
-                events.push(SchedulerEvent {
+                self.event_buf.push(SchedulerEvent {
                     frame_offset: offset.min(frames.saturating_sub(1)),
                     kind: EventKind::NoteOff { note },
                 });
             } else if off_at >= block_end {
-                remaining_offs.push((off_at, note));
+                self.off_buf.push((off_at, note));
             }
-            // else: already past, drop
         }
-        self.pending_offs = remaining_offs;
+        std::mem::swap(&mut self.pending_offs, &mut self.off_buf);
 
         self.samples_elapsed += frames as u64;
-        events.sort_by_key(|e| e.frame_offset);
-        events
+        self.event_buf.sort_by_key(|e| e.frame_offset);
+        &self.event_buf
     }
 
+    #[allow(dead_code)]
     pub fn patterns(&self) -> &[PatternSlot] {
         &self.patterns
     }
 
     fn ticks_to_samples(&self, ticks: u32) -> u64 {
-        // Assuming 120 BPM: 1 beat = 0.5s, TICKS_PER_BEAT ticks = 0.5s
-        // samples = ticks * (sample_rate * 60) / (BPM * TICKS_PER_BEAT)
-        // For now, hardcode 120 BPM
-        let bpm = 120.0f64;
-        let samples_per_tick = (self.sample_rate as f64 * 60.0) / (bpm * TICKS_PER_BEAT as f64);
+        let samples_per_tick =
+            (self.sample_rate as f64 * 60.0) / (self.bpm * TICKS_PER_BEAT as f64);
         (ticks as f64 * samples_per_tick) as u64
     }
 }
@@ -227,19 +232,24 @@ mod tests {
     #[test]
     fn pattern_triggers_note() {
         let mut sched = Scheduler::new(48000);
-        sched.set_pattern(0, PatternSlot {
-            events: vec![NoteEvent {
-                tick: 0,
-                note: 60,
-                duration_ticks: 240,
-                gain: 0.5,
-            }],
-            total_ticks: TICKS_PER_BEAT * 4,
-            active: true,
-        });
+        sched.set_pattern(
+            0,
+            PatternSlot {
+                events: vec![NoteEvent {
+                    tick: 0,
+                    note: 60,
+                    duration_ticks: 240,
+                    gain: 0.5,
+                }],
+                total_ticks: TICKS_PER_BEAT * 4,
+                active: true,
+            },
+        );
 
         let events = sched.advance(128);
-        assert!(events.iter().any(|e| matches!(e.kind, EventKind::NoteOn { note: 60, .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e.kind, EventKind::NoteOn { note: 60, .. })));
     }
 
     #[test]
@@ -247,24 +257,30 @@ mod tests {
         let mut sched = Scheduler::new(48000);
         sched.enqueue_now(72, 4800, 0.3);
         let events = sched.advance(128);
-        assert!(events.iter().any(|e| matches!(e.kind, EventKind::NoteOn { note: 72, .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e.kind, EventKind::NoteOn { note: 72, .. })));
     }
 
     #[test]
     fn chord_from_pattern() {
         let mut sched = Scheduler::new(48000);
-        sched.set_pattern(0, PatternSlot {
-            events: vec![
-                NoteEvent { tick: 0, note: 60, duration_ticks: 240, gain: 0.3 },
-                NoteEvent { tick: 0, note: 64, duration_ticks: 240, gain: 0.3 },
-                NoteEvent { tick: 0, note: 67, duration_ticks: 240, gain: 0.3 },
-            ],
-            total_ticks: TICKS_PER_BEAT * 4,
-            active: true,
-        });
+        sched.set_pattern(
+            0,
+            PatternSlot {
+                events: vec![
+                    NoteEvent { tick: 0, note: 60, duration_ticks: 240, gain: 0.3 },
+                    NoteEvent { tick: 0, note: 64, duration_ticks: 240, gain: 0.3 },
+                    NoteEvent { tick: 0, note: 67, duration_ticks: 240, gain: 0.3 },
+                ],
+                total_ticks: TICKS_PER_BEAT * 4,
+                active: true,
+            },
+        );
 
         let events = sched.advance(128);
-        let note_ons: Vec<_> = events.iter()
+        let note_ons: Vec<_> = events
+            .iter()
             .filter(|e| matches!(e.kind, EventKind::NoteOn { .. }))
             .collect();
         assert_eq!(note_ons.len(), 3);
