@@ -2,28 +2,62 @@
 
 キーボード入力に応じてリアルタイムにBGMが変化するバックグラウンド常駐型デスクトップアプリ。
 
-## 概要
+## アーキテクチャ
 
-タイピング速度や入力パターンに応じて、BGMのテンポ・音色・パターンがリアルタイムに変化する。音声エンジンとインターフェースは完全に分離されており、デスクトップアプリ・ゲームエンジン・外部ツール等から利用可能。
+3層構成で、各層の境界は型で定義されており、差し替え可能。
+
+```
+[Input Adapters]          [ScoreProvider]               [Engine]
+                          (trait: 差し替え可能)
+rdev  ──┐                ┌──────────────────┐
+        ├── InputEvent ──│ on_event()       │── Score ──> Scheduler ──> Faust DSP ──> cpal
+egui  ──┘                │ score() -> Score │            (playhead を atomic 共有 → GUI)
+                         └──────────────────┘
+                         実装: RawRhythmProvider
+```
+
+### 型安全な境界
+
+| 型 | 役割 | 定義場所 |
+|----|------|---------|
+| `InputEvent` | Input → ScoreProvider の境界。入力ソース非依存 | `engine/src/core/event.rs` |
+| `Score` | ScoreProvider → Engine の境界。NoteEvent のリスト + ループ長 | `engine/src/core/scheduler.rs` |
+| `ScoreProvider` | Record + Interpret を束ねたトレイト。差し替え単位 | `engine/src/core/score_provider.rs` |
+
+### Engine 内部 (FC/IS)
+
+```
+engine/
+├── core/                  Functional Core（純粋・テスト可能）
+│   ├── scheduler.rs       再生位置管理 + NoteOn/Off イベント生成
+│   ├── dsp.rs             Faust シンセラッパー
+│   ├── score_provider.rs  ScoreProvider トレイト定義
+│   ├── event.rs           InputEvent 定義
+│   └── config.rs          EngineConfig（環境変数対応）
+└── shell/                 Imperative Shell（副作用・I/O）
+    ├── audio.rs           cpal デバイス管理・ストリーム構築
+    ├── bridge.rs          Scheduler → Faust → cpal（リングバッファ）
+    └── command.rs         Engine ↔ 音声スレッド間の Command enum
+```
 
 ## 技術スタック
 
 | レイヤー | 技術 | 役割 |
 |---------|------|------|
-| シーケンシング | [Glicol](https://glicol.org/) | ライブコーディングエンジン（Rust） |
-| DSP/シンセ | [Faust](https://faust.grame.fr/) → Rust | ビルド時にRustコード生成 |
+| DSP/シンセ | [Faust](https://faust.grame.fr/) → Rust | ビルド時に `.dsp` → `.rs` 生成 |
+| スケジューラ | 自前 (Rust) | 再生位置管理、NoteOn/Off 発火 |
 | オーディオ出力 | [cpal](https://github.com/RustAudio/cpal) | クロスプラットフォーム |
-| GUI | egui | パラメータ表示・操作 |
-| 入力検知 | rdev | グローバルキーボードキャプチャ |
+| GUI | [egui](https://github.com/emilk/egui) | パラメータ表示・リズムグリッド |
+| 入力検知 | [rdev](https://github.com/Narsil/rdev) | グローバルキーボードキャプチャ |
 
 ## クレート構成
 
 ```
 reactive-bgm/
 ├── engine/   — コアオーディオエンジン (lib + cdylib)
-│   ├── core/     Functional Core: パターン評価、DSP、設定
-│   └── shell/    Imperative Shell: オーディオI/O、コマンドブリッジ
 ├── app/      — デスクトップアプリ (bin)
+│   ├── input.rs                Input アダプター (rdev, egui)
+│   └── raw_rhythm_provider.rs  ScoreProvider 実装
 └── server/   — OSC/WebSocket サーバー (bin) [予定]
 ```
 
@@ -53,24 +87,24 @@ cargo test -p reactive-bgm-engine
 ## ロードマップ
 
 - [x] Faust DSP シンセ統合
-- [x] Glicol シーケンサー統合
-- [x] Glicol + Faust ミキシング
-- [ ] キーボード入力 → パラメータ変換
-- [ ] egui GUI（パラメータ表示・スライダー操作）
+- [x] 自前スケジューラ（playhead を GUI と atomic 共有）
+- [x] キーボード入力 → リズムパターン → 音声出力
+- [x] egui GUI（リズムグリッド + playhead 表示）
+- [x] ScoreProvider トレイトによる入力/出力層の分離
 - [ ] システムトレイ常駐
+- [ ] 複数の ScoreProvider 実装（WPM ティア、メロディ変換等）
 
 ### 拡張予定
 
-以下は現時点では未実装だが、アーキテクチャ上対応可能な設計になっている。
+アーキテクチャ上対応可能な設計になっている。
 
-- **C ABI (cdylib)**: engine を共有ライブラリとしてビルドし、Unity (C# P/Invoke) 等の外部エンジンから利用
-- **OSC / WebSocket サーバー**: `server` クレートで engine をネットワーク経由で制御。TouchOSC、SC、ゲームエンジン等から接続
-- **追加 Faust DSP**: `engine/dsp/` に `.dsp` ファイルを追加し build.rs で自動コンパイル。複数シンセの切り替え・レイヤー
-- **MIDI コントローラー対応**
-- **プリセット管理**: パターン + DSP パラメータのセットを保存・切り替え
+- **C ABI (cdylib)**: engine を共有ライブラリとしてビルドし、Unity (C# P/Invoke) 等から利用
+- **OSC / WebSocket サーバー**: `server` クレートで engine をネットワーク経由で制御
+- **追加 Faust DSP**: `engine/dsp/` に `.dsp` ファイルを追加し build.rs で自動コンパイル
+- **MIDI コントローラー対応**: InputEvent に MidiNote バリアントを追加、新しい InputAdapter を実装
+- **プリセット管理**: Score のシリアライズ/デシリアライズ
 
 ## ライセンス
 
-- **Glicol**: MIT
 - **Faust コンパイラ**: LGPL（生成コードには適用されない）
 - **cpal**: Apache-2.0
