@@ -55,11 +55,13 @@ impl DspProcessor {
         }
     }
 
-    pub fn note_on(&mut self, note: u8, gain: f32) {
+    /// Returns the voice index that was allocated.
+    pub fn note_on(&mut self, note: u8, gain: f32) -> usize {
         let idx = self.allocator.note_on(note);
         self.voices[idx].set_param(ParamIndex(PARAM_FREQ), midi_to_freq(note));
         self.voices[idx].set_param(ParamIndex(PARAM_GAIN), gain);
         self.voices[idx].set_param(ParamIndex(PARAM_GATE), 1.0);
+        idx
     }
 
     pub fn note_off(&mut self, note: u8) {

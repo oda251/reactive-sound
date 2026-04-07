@@ -19,22 +19,6 @@ pub struct Bridge {
 
 const BLOCK_SIZE: usize = 128;
 
-/// Pending DSP action collected from scheduler events.
-enum DspAction {
-    NoteOn {
-        note: u8,
-        gain: f32,
-        overrides: Vec<ParamValue>,
-    },
-    NoteOff {
-        note: u8,
-    },
-    ParamChange {
-        param: i32,
-        value: f32,
-    },
-}
-
 impl Bridge {
     pub fn new(
         scheduler: Scheduler,
@@ -90,9 +74,11 @@ impl Bridge {
 
     fn apply_immediate(&mut self, action: ImmediateAction) {
         match action {
-            ImmediateAction::NoteOn { note, gain } => self.dsp.note_on(note, gain),
+            ImmediateAction::NoteOn { note, gain } => {
+                self.dsp.note_on(note, gain);
+            }
             ImmediateAction::NoteOff { note } => self.dsp.note_off(note),
-            ImmediateAction::SetParam(idx, val) => self.dsp.set_voice_param(0, idx, val),
+            ImmediateAction::SetParam(param, value) => self.dsp.set_voice_param(0, param, value),
         }
     }
 
@@ -100,47 +86,35 @@ impl Bridge {
         let bs = self.block_size;
         let block_samples = bs * self.channels as usize;
 
-        // Collect events (scheduler borrows self, dsp needs self)
-        let mut actions: Vec<DspAction> = Vec::new();
+        // Collect events into small vecs to break the borrow on self.scheduler
+        let mut note_ons: Vec<(u8, f32, Vec<ParamValue>)> = Vec::new();
+        let mut note_offs: Vec<u8> = Vec::new();
+        let mut param_changes: Vec<ParamValue> = Vec::new();
+
         self.scheduler.advance(bs, |event| match &event.kind {
             EventKind::NoteOn {
                 note,
                 gain,
                 overrides,
                 ..
-            } => actions.push(DspAction::NoteOn {
-                note: *note,
-                gain: *gain,
-                overrides: overrides.clone(),
-            }),
-            EventKind::NoteOff { note, .. } => actions.push(DspAction::NoteOff { note: *note }),
-            EventKind::ParamChange { change, .. } => actions.push(DspAction::ParamChange {
-                param: change.param,
-                value: change.value,
-            }),
+            } => note_ons.push((*note, *gain, overrides.clone())),
+            EventKind::NoteOff { note, .. } => note_offs.push(*note),
+            EventKind::ParamChange { change, .. } => param_changes.push(change.clone()),
         });
 
-        // Apply actions
-        for action in &actions {
-            match action {
-                DspAction::NoteOn {
-                    note,
-                    gain,
-                    overrides,
-                } => {
-                    self.dsp.note_on(*note, *gain);
-                    // Apply overrides to the voice that was just allocated
-                    // (note_on returns void but the allocator tracks the latest voice)
-                    for pv in overrides {
-                        // TODO: route to correct voice once multi-DSP is implemented
-                        self.dsp.set_voice_param(0, pv.param, pv.value);
-                    }
-                }
-                DspAction::NoteOff { note } => self.dsp.note_off(*note),
-                DspAction::ParamChange { param, value } => {
-                    self.dsp.set_voice_param(0, *param, *value);
-                }
+        for (note, gain, overrides) in &note_ons {
+            let voice_idx = self.dsp.note_on(*note, *gain);
+            for pv in overrides {
+                self.dsp.set_voice_param(voice_idx, pv.param, pv.value);
             }
+        }
+        for note in &note_offs {
+            self.dsp.note_off(*note);
+        }
+        for pv in &param_changes {
+            // Global param changes apply to voice 0 for now
+            // TODO: route via VoiceType when multi-DSP is implemented
+            self.dsp.set_voice_param(0, pv.param, pv.value);
         }
 
         self.faust_buf[..block_samples].fill(0.0);
