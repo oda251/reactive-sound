@@ -90,9 +90,14 @@ cargo test -p reactive-bgm-engine
 - [x] 自前スケジューラ（playhead を GUI と atomic 共有）
 - [x] キーボード入力 → リズムパターン → 音声出力
 - [x] egui GUI（リズムグリッド + playhead 表示）
-- [x] ScoreProvider トレイトによる入力/出力層の分離
+- [x] ScoreProvider → InputEffect トレイト階層（ImmediateEffect / AccumulativeEffect）
+- [x] 8 ボイスポリフォニー + VoiceAllocator
+- [x] VoiceType（複数シンセルーティング基盤）
+- [x] tick ベーススケジューラ（480 ticks/beat、パターン + イベントキュー）
+- [x] ParamValue 共有型（NoteEvent.overrides + ParamEvent）
+- [ ] 複数 Faust DSP（VoiceType ごとに別シンセ）
 - [ ] システムトレイ常駐
-- [ ] 複数の ScoreProvider 実装（WPM ティア、メロディ変換等）
+- [ ] 複数の AccumulativeEffect 実装（WPM ティア、メロディ変換等）
 
 ### 拡張予定
 
@@ -100,9 +105,11 @@ cargo test -p reactive-bgm-engine
 
 - **C ABI (cdylib)**: engine を共有ライブラリとしてビルドし、Unity (C# P/Invoke) 等から利用
 - **OSC / WebSocket サーバー**: `server` クレートで engine をネットワーク経由で制御
-- **追加 Faust DSP**: `engine/dsp/` に `.dsp` ファイルを追加し build.rs で自動コンパイル
+- **追加 Faust DSP**: `engine/dsp/` に `.dsp` ファイルを追加し build.rs で自動コンパイル。VoiceType でルーティング
 - **MIDI コントローラー対応**: InputEvent に MidiNote バリアントを追加、新しい InputAdapter を実装
-- **プリセット管理**: Score のシリアライズ/デシリアライズ
+- **サンプル再生**: Faust の soundfile プリミティブ、または Rust 側で wav 読み込み + バッファ管理
+- **リアルタイム録音**: cpal マイク入力 → バッファ → サンプラー
+- **プリセット管理**: PatternSlot + DSP パラメータのシリアライズ/デシリアライズ
 
 ## ライセンス
 
