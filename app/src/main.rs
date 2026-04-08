@@ -3,12 +3,12 @@ mod lane;
 mod raw_rhythm_provider;
 
 use eframe::egui;
-use reactive_bgm_engine::{AccumulativeEffect, Engine, ImmediateEffect, InputEffect, InputEvent};
+use reactive_bgm_engine::{AccumulativeEffect, Engine, ImmediateEffect, InputEvent};
 use std::sync::mpsc;
 use std::time::Instant;
 
-use lane::{draw_lane, split_into_measures, LaneCursor};
-
+use input::{EguiAdapter, InputAdapter, RdevAdapter};
+use lane::{draw_lane, split_into_measures, CursorStyle, LaneConfig};
 use raw_rhythm_provider::{KeyClickEffect, RhythmAccumulator, MEASURES};
 
 fn main() {
@@ -18,7 +18,9 @@ fn main() {
 
     let (event_tx, event_rx) = mpsc::channel::<InputEvent>();
 
-    input::start_rdev_adapter(event_tx.clone());
+    // Input adapters — add more here (e.g., MidiAdapter, OscAdapter)
+    RdevAdapter.start(event_tx.clone());
+
     let egui_tx = event_tx;
 
     let options = eframe::NativeOptions {
@@ -42,8 +44,8 @@ struct App {
     engine: Engine,
     egui_tx: mpsc::Sender<InputEvent>,
     event_rx: mpsc::Receiver<InputEvent>,
-    accumulator: RhythmAccumulator,
-    click: KeyClickEffect,
+    immediate_effects: Vec<Box<dyn ImmediateEffect>>,
+    accumulative_effects: Vec<Box<dyn AccumulativeEffect>>,
     key_count: u64,
     last_update: Option<Instant>,
     committed_positions: Vec<f32>,
@@ -61,42 +63,61 @@ impl App {
             engine,
             egui_tx,
             event_rx,
-            accumulator: RhythmAccumulator::new(epoch),
-            click: KeyClickEffect::new(),
+            immediate_effects: vec![Box::new(KeyClickEffect::new())],
+            accumulative_effects: vec![Box::new(RhythmAccumulator::new(epoch))],
             key_count: 0,
             last_update: None,
             committed_positions: Vec::new(),
             cached_score_events: vec![Vec::new(); MEASURES],
         }
     }
+
+    fn accumulator(&self) -> &RhythmAccumulator {
+        // The first accumulative effect is always the rhythm accumulator
+        self.accumulative_effects[0]
+            .as_any()
+            .downcast_ref::<RhythmAccumulator>()
+            .expect("first accumulative effect must be RhythmAccumulator")
+    }
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        input::drain_egui_keys(ui.ctx(), &self.egui_tx);
+        EguiAdapter::drain(ui.ctx(), &self.egui_tx);
 
         let now = Instant::now();
 
         while let Ok(event) = self.event_rx.try_recv() {
             self.key_count += 1;
-            self.accumulator.on_event(&event, now);
-            self.click.on_event(&event, now);
+            for eff in &mut self.immediate_effects {
+                eff.on_event(&event, now);
+            }
+            for eff in &mut self.accumulative_effects {
+                eff.on_event(&event, now);
+            }
         }
 
-        for action in self.click.drain_actions() {
-            let _ = self.engine.send_immediate(action);
+        // Drain immediate actions
+        for eff in &mut self.immediate_effects {
+            for action in eff.drain_actions() {
+                let _ = self.engine.send_immediate(action);
+            }
         }
 
+        // Update accumulative patterns periodically
         let should_update = match self.last_update {
             Some(last) => now.duration_since(last).as_millis() >= UPDATE_INTERVAL_MS,
             None => true,
         };
 
         if should_update {
-            let pattern = self.accumulator.score(now);
-            self.committed_positions = self.accumulator.note_positions(now);
+            for (i, eff) in self.accumulative_effects.iter().enumerate() {
+                let pattern = eff.score(now);
+                let _ = self.engine.set_pattern(i, pattern);
+            }
+            // GUI uses the first accumulator for display
+            self.committed_positions = self.accumulator().note_positions(now);
             self.cached_score_events = split_into_measures(&self.committed_positions, MEASURES);
-            let _ = self.engine.set_pattern(0, pattern);
             self.last_update = Some(now);
         }
 
@@ -114,7 +135,7 @@ impl eframe::App for App {
             ui.label("Keys:");
             ui.strong(format!("{}", self.key_count));
             ui.label("  Events:");
-            ui.strong(format!("{}", self.accumulator.event_count()));
+            ui.strong(format!("{}", self.accumulator().event_count()));
         });
 
         // === Score ===
@@ -122,27 +143,33 @@ impl eframe::App for App {
         ui.label("Score");
         ui.add_space(2.0);
 
+        let score_note_color = |_pos: f32| egui::Color32::from_rgb(60, 220, 60);
+
         for m in 0..MEASURES {
-            let cursor = if m == playhead_measure {
-                Some(LaneCursor {
-                    position: playhead_in_measure,
-                    color: egui::Color32::from_rgb(255, 80, 80),
+            let is_active = m == playhead_measure;
+            let config = LaneConfig::new(lane_width, 16.0)
+                .bg(if is_active {
+                    egui::Color32::from_gray(32)
+                } else {
+                    egui::Color32::from_gray(25)
                 })
+                .notes(&score_note_color);
+
+            let config = if is_active {
+                config.cursor(
+                    playhead_in_measure,
+                    CursorStyle {
+                        color: egui::Color32::from_rgb(255, 80, 80),
+                        width: 2.0,
+                    },
+                )
             } else {
-                None
+                config
             };
 
             ui.horizontal(|ui| {
                 ui.label(format!("{:>2}", m + 1));
-                draw_lane(
-                    ui,
-                    lane_width,
-                    16.0,
-                    &self.cached_score_events[m],
-                    egui::Color32::from_rgb(60, 220, 60),
-                    cursor.as_ref(),
-                    m == playhead_measure,
-                );
+                draw_lane(ui, &config, &self.cached_score_events[m]);
             });
         }
 
@@ -152,25 +179,25 @@ impl eframe::App for App {
         ui.label("Input (1 measure)");
         ui.add_space(2.0);
 
-        let input_cursor_pos = self.accumulator.input_cursor(now);
-        let measure_notes = self.accumulator.current_measure_notes(now);
+        let input_cursor_pos = self.accumulator().input_cursor(now);
+        let measure_notes = self.accumulator().current_measure_notes(now);
 
-        let cursor = LaneCursor {
-            position: input_cursor_pos,
-            color: egui::Color32::from_rgb(80, 200, 255),
-        };
+        let input_note_color = |_pos: f32| egui::Color32::from_rgb(80, 180, 255);
+
+        let input_config = LaneConfig::new(lane_width, 24.0)
+            .bg(egui::Color32::from_gray(30))
+            .notes(&input_note_color)
+            .cursor(
+                input_cursor_pos,
+                CursorStyle {
+                    color: egui::Color32::from_rgb(80, 200, 255),
+                    width: 2.0,
+                },
+            );
 
         ui.horizontal(|ui| {
             ui.label("  ");
-            draw_lane(
-                ui,
-                lane_width,
-                24.0,
-                &measure_notes,
-                egui::Color32::from_rgb(80, 180, 255),
-                Some(&cursor),
-                true,
-            );
+            draw_lane(ui, &input_config, &measure_notes);
         });
 
         ui.ctx()

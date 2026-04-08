@@ -3,35 +3,47 @@ use rdev::{listen, Event, EventType};
 use std::sync::mpsc;
 use std::time::Instant;
 
-/// Spawns a background thread that captures global keyboard events
-/// and sends InputEvents via the provided sender.
-pub fn start_rdev_adapter(tx: mpsc::Sender<InputEvent>) {
-    std::thread::spawn(move || {
-        listen(move |event| {
-            if let Event {
-                event_type: EventType::KeyPress(_),
-                ..
-            } = event
-            {
-                let _ = tx.send(InputEvent::KeyPress {
-                    timestamp: Instant::now(),
-                });
-            }
-        })
-        .expect("failed to listen for keyboard events");
-    });
+/// Trait for input adapters. Each adapter sends InputEvents through a shared channel.
+pub trait InputAdapter: Send + 'static {
+    fn start(self, tx: mpsc::Sender<InputEvent>);
 }
 
-/// Drains egui key events and sends them as InputEvents.
-pub fn drain_egui_keys(ctx: &eframe::egui::Context, tx: &mpsc::Sender<InputEvent>) {
-    let count = ctx.input(|i| {
-        i.events
-            .iter()
-            .filter(|e| matches!(e, eframe::egui::Event::Key { pressed: true, .. }))
-            .count()
-    });
-    let now = Instant::now();
-    for _ in 0..count {
-        let _ = tx.send(InputEvent::KeyPress { timestamp: now });
+/// Global keyboard capture via rdev.
+pub struct RdevAdapter;
+
+impl InputAdapter for RdevAdapter {
+    fn start(self, tx: mpsc::Sender<InputEvent>) {
+        std::thread::spawn(move || {
+            listen(move |event| {
+                if let Event {
+                    event_type: EventType::KeyPress(_),
+                    ..
+                } = event
+                {
+                    let _ = tx.send(InputEvent::KeyPress {
+                        timestamp: Instant::now(),
+                    });
+                }
+            })
+            .expect("failed to listen for keyboard events");
+        });
+    }
+}
+
+/// Captures key events from egui (when window has focus).
+pub struct EguiAdapter;
+
+impl EguiAdapter {
+    pub fn drain(ctx: &eframe::egui::Context, tx: &mpsc::Sender<InputEvent>) {
+        let count = ctx.input(|i| {
+            i.events
+                .iter()
+                .filter(|e| matches!(e, eframe::egui::Event::Key { pressed: true, .. }))
+                .count()
+        });
+        let now = Instant::now();
+        for _ in 0..count {
+            let _ = tx.send(InputEvent::KeyPress { timestamp: now });
+        }
     }
 }

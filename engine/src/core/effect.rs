@@ -23,4 +23,5 @@ pub trait ImmediateEffect: InputEffect {
 /// Accumulates input over time and produces a PatternSlot for looped playback.
 pub trait AccumulativeEffect: InputEffect {
     fn score(&self, now: Instant) -> PatternSlot;
+    fn as_any(&self) -> &dyn std::any::Any;
 }

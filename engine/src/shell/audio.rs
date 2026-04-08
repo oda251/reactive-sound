@@ -3,7 +3,8 @@ use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
-use crate::core::{DspProcessor, EngineConfig, Scheduler};
+use crate::core::{EngineConfig, Scheduler};
+use crate::core::dsp::DspProcessor;
 use crate::shell::bridge::Bridge;
 use crate::shell::command::Command;
 
@@ -20,7 +21,7 @@ impl AudioOutput {
         let stream_config = device.default_output_config()?;
 
         let sample_rate = config.sample_rate_or(stream_config.sample_rate().0);
-        let dsp = DspProcessor::new(sample_rate, 128);
+        let dsp = Box::new(DspProcessor::new(sample_rate, 128));
         let scheduler = Scheduler::new(sample_rate);
 
         let (cmd_tx, cmd_rx) = mpsc::channel();

@@ -9,7 +9,11 @@ const LOOP_BEATS: u32 = 40; // 10 measures * 4 beats
 const TOTAL_TICKS: u32 = TICKS_PER_BEAT * LOOP_BEATS;
 const WINDOW: Duration = Duration::from_secs(20);
 const NOTE_DURATION_TICKS: u32 = TICKS_PER_BEAT / 4; // sixteenth note
-const HIT_NOTES: [u8; 4] = [60, 67, 72, 63];
+/// Default note mapping: cycles through C4, G4, C5, Eb4.
+pub fn default_note_mapping(index: usize) -> u8 {
+    const HIT_NOTES: [u8; 4] = [60, 67, 72, 63];
+    HIT_NOTES[index % HIT_NOTES.len()]
+}
 
 pub const MEASURES: usize = 10;
 
@@ -18,13 +22,19 @@ pub const MEASURES: usize = 10;
 pub struct RhythmAccumulator {
     timestamps: VecDeque<Instant>,
     epoch: Instant,
+    note_mapping: fn(usize) -> u8,
 }
 
 impl RhythmAccumulator {
     pub fn new(epoch: Instant) -> Self {
+        Self::with_note_mapping(epoch, default_note_mapping)
+    }
+
+    pub fn with_note_mapping(epoch: Instant, note_mapping: fn(usize) -> u8) -> Self {
         Self {
             timestamps: VecDeque::new(),
             epoch,
+            note_mapping,
         }
     }
 
@@ -103,6 +113,10 @@ impl InputEffect for RhythmAccumulator {
 }
 
 impl AccumulativeEffect for RhythmAccumulator {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn score(&self, now: Instant) -> PatternSlot {
         let window_start = now.checked_sub(WINDOW).unwrap_or(now);
 
@@ -115,7 +129,7 @@ impl AccumulativeEffect for RhythmAccumulator {
                 let pos = offset.as_secs_f32() / WINDOW.as_secs_f32();
                 if (0.0..1.0).contains(&pos) {
                     let tick = (pos * TOTAL_TICKS as f32) as u32;
-                    let note = HIT_NOTES[hit_idx % HIT_NOTES.len()];
+                    let note = (self.note_mapping)(hit_idx);
                     hit_idx += 1;
                     Some(NoteEvent {
                         tick,

@@ -31,14 +31,14 @@ use faust_piano::*;
 pub const PARAM_FREQ: i32 = 0;
 pub const PARAM_GAIN: i32 = 1;
 pub const PARAM_GATE: i32 = 2;
+
+use crate::core::synth::Synth;
 use crate::core::voice::VoiceAllocator;
 
 pub struct DspProcessor {
     voices: Vec<FaustPiano>,
     allocator: VoiceAllocator,
-    // Per-voice output buffers
     voice_bufs: Vec<[Vec<f32>; 2]>,
-    // Mixed output
     mix_buf: [Vec<f32>; 2],
 }
 
@@ -69,9 +69,10 @@ impl DspProcessor {
             mix_buf: [vec![0.0; max_block_size], vec![0.0; max_block_size]],
         }
     }
+}
 
-    /// Returns the voice index that was allocated.
-    pub fn note_on(&mut self, note: u8, gain: f32) -> usize {
+impl Synth for DspProcessor {
+    fn note_on(&mut self, note: u8, gain: f32) -> usize {
         let idx = self.allocator.note_on(note);
         self.voices[idx].set_param(ParamIndex(PARAM_FREQ), midi_to_freq(note));
         self.voices[idx].set_param(ParamIndex(PARAM_GAIN), gain);
@@ -79,27 +80,25 @@ impl DspProcessor {
         idx
     }
 
-    pub fn note_off(&mut self, note: u8) {
+    fn note_off(&mut self, note: u8) {
         if let Some(idx) = self.allocator.note_off(note) {
             self.voices[idx].set_param(ParamIndex(PARAM_GATE), 0.0);
         }
     }
 
-    pub fn set_voice_param(&mut self, voice: usize, param: i32, value: f32) {
+    fn set_voice_param(&mut self, voice: usize, param: i32, value: f32) {
         if voice < self.voices.len() {
             self.voices[voice].set_param(ParamIndex(param), value);
         }
     }
 
-    pub fn render_interleaved(&mut self, out: &mut [f32], frames: usize) -> usize {
+    fn render_interleaved(&mut self, out: &mut [f32], frames: usize) -> usize {
         let frames = frames.min(out.len() / 2);
         let inputs: &[&[f32]] = &[];
 
-        // Clear mix buffer
         self.mix_buf[0][..frames].fill(0.0);
         self.mix_buf[1][..frames].fill(0.0);
 
-        // Render only active voices
         for (i, synth) in self.voices.iter_mut().enumerate() {
             if !self.allocator.is_active(i) {
                 continue;
@@ -115,7 +114,6 @@ impl DspProcessor {
             }
         }
 
-        // Interleave
         for i in 0..frames {
             out[i * 2] = self.mix_buf[0][i];
             out[i * 2 + 1] = self.mix_buf[1][i];
@@ -140,7 +138,7 @@ mod tests {
     #[test]
     fn single_note() {
         let mut dsp = DspProcessor::new(48000, 128);
-        dsp.note_on(69, 0.5); // A4
+        dsp.note_on(69, 0.5);
         let mut buf = vec![0.0f32; 256];
         dsp.render_interleaved(&mut buf, 128);
         let max = buf.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
@@ -150,9 +148,9 @@ mod tests {
     #[test]
     fn chord() {
         let mut dsp = DspProcessor::new(48000, 128);
-        dsp.note_on(60, 0.3); // C4
-        dsp.note_on(64, 0.3); // E4
-        dsp.note_on(67, 0.3); // G4
+        dsp.note_on(60, 0.3);
+        dsp.note_on(64, 0.3);
+        dsp.note_on(67, 0.3);
         let mut buf = vec![0.0f32; 256];
         dsp.render_interleaved(&mut buf, 128);
         let max = buf.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
@@ -163,12 +161,9 @@ mod tests {
     fn note_off_silences() {
         let mut dsp = DspProcessor::new(48000, 128);
         dsp.note_on(69, 0.5);
-        // Render a few blocks to let envelope open
         let mut buf = vec![0.0f32; 256];
         dsp.render_interleaved(&mut buf, 128);
-        // Note off
         dsp.note_off(69);
-        // Render many blocks to let envelope close
         for _ in 0..200 {
             dsp.render_interleaved(&mut buf, 128);
         }

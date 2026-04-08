@@ -2,7 +2,8 @@ use std::sync::mpsc;
 
 use crate::core::effect::ImmediateAction;
 use crate::core::scheduler::ParamValue;
-use crate::core::{DspProcessor, EngineConfig, EventKind, Scheduler};
+use crate::core::synth::Synth;
+use crate::core::{EngineConfig, EventKind, Scheduler};
 use crate::shell::command::Command;
 
 /// Pre-allocated buffers for collecting scheduler events.
@@ -31,7 +32,7 @@ impl EventCollector {
 
 pub struct Bridge {
     scheduler: Scheduler,
-    dsp: DspProcessor,
+    dsp: Box<dyn Synth + Send>,
     cmd_rx: mpsc::Receiver<Command>,
     collector: EventCollector,
     channels: u16,
@@ -47,7 +48,7 @@ const BLOCK_SIZE: usize = 128;
 impl Bridge {
     pub fn new(
         scheduler: Scheduler,
-        dsp: DspProcessor,
+        dsp: Box<dyn Synth + Send>,
         cmd_rx: mpsc::Receiver<Command>,
         config: &EngineConfig,
     ) -> Self {
