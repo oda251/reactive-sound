@@ -8,10 +8,25 @@
     unused_mut,
     non_upper_case_globals
 )]
-mod faust_generated {
+mod faust_synth {
     include!(concat!(env!("OUT_DIR"), "/faust_synth.rs"));
 }
-use faust_generated::*;
+
+#[allow(
+    clippy::all,
+    unused_parens,
+    non_snake_case,
+    non_camel_case_types,
+    dead_code,
+    unused_variables,
+    unused_mut,
+    non_upper_case_globals
+)]
+mod faust_piano {
+    include!(concat!(env!("OUT_DIR"), "/faust_piano.rs"));
+}
+
+use faust_piano::*;
 
 pub const PARAM_FREQ: i32 = 0;
 pub const PARAM_GAIN: i32 = 1;
@@ -19,7 +34,7 @@ pub const PARAM_GATE: i32 = 2;
 use crate::core::voice::VoiceAllocator;
 
 pub struct DspProcessor {
-    voices: Vec<FaustSynth>,
+    voices: Vec<FaustPiano>,
     allocator: VoiceAllocator,
     // Per-voice output buffers
     voice_bufs: Vec<[Vec<f32>; 2]>,
@@ -38,7 +53,7 @@ impl DspProcessor {
 
         let mut voices = Vec::with_capacity(num_voices);
         for _ in 0..num_voices {
-            let mut synth = FaustSynth::new();
+            let mut synth = FaustPiano::new();
             synth.init(sample_rate as i32);
             voices.push(synth);
         }

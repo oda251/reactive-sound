@@ -1,37 +1,18 @@
 use std::path::Path;
 use std::process::Command;
 
-fn main() {
-    let dsp_file = "dsp/synth.dsp";
-    let out_dir = std::env::var("OUT_DIR").unwrap();
-    let out_file = Path::new(&out_dir).join("faust_synth.rs");
-
-    println!("cargo::rerun-if-changed={dsp_file}");
-
-    let status = Command::new("faust")
-        .args(["-lang", "rust", "-cn", "FaustSynth", "-o"])
-        .arg(&out_file)
-        .arg(dsp_file)
-        .status()
-        .expect("failed to run faust compiler");
-
-    assert!(status.success(), "faust compilation failed");
-
-    // Read generated code and wrap with type aliases
-    let generated = std::fs::read_to_string(&out_file).unwrap();
-    let wrapped = format!(
-        r#"type FaustFloat = f32;
+const FAUST_PREAMBLE: &str = r#"type FaustFloat = f32;
 type F32 = f32;
 type F64 = f64;
 
 #[derive(Copy, Clone, Debug)]
 pub struct ParamIndex(pub i32);
 
-pub trait Meta {{
+pub trait Meta {
     fn declare(&mut self, key: &str, value: &str);
-}}
+}
 
-pub trait UI<T> {{
+pub trait UI<T> {
     fn open_tab_box(&mut self, label: &str);
     fn open_horizontal_box(&mut self, label: &str);
     fn open_vertical_box(&mut self, label: &str);
@@ -44,9 +25,9 @@ pub trait UI<T> {{
     fn add_horizontal_bargraph(&mut self, label: &str, param: ParamIndex, min: T, max: T);
     fn add_vertical_bargraph(&mut self, label: &str, param: ParamIndex, min: T, max: T);
     fn declare(&mut self, param: Option<ParamIndex>, key: &str, value: &str);
-}}
+}
 
-pub trait FaustDsp {{
+pub trait FaustDsp {
     type T;
     fn new() -> Self where Self: Sized;
     fn metadata(&self, m: &mut dyn Meta);
@@ -64,11 +45,39 @@ pub trait FaustDsp {{
     fn get_param(&self, param: ParamIndex) -> Option<Self::T>;
     fn set_param(&mut self, param: ParamIndex, value: Self::T);
     fn compute(&mut self, count: i32, inputs: &[&[Self::T]], outputs: &mut [&mut [Self::T]]);
-}}
+}
+"#;
 
-{generated}
-"#
-    );
+struct DspFile {
+    src: &'static str,
+    class_name: &'static str,
+    out_name: &'static str,
+}
 
-    std::fs::write(&out_file, wrapped).unwrap();
+const DSP_FILES: &[DspFile] = &[
+    DspFile { src: "dsp/synth.dsp", class_name: "FaustSynth", out_name: "faust_synth.rs" },
+    DspFile { src: "dsp/piano.dsp", class_name: "FaustPiano", out_name: "faust_piano.rs" },
+];
+
+fn main() {
+    let out_dir = std::env::var("OUT_DIR").unwrap();
+
+    for dsp in DSP_FILES {
+        println!("cargo::rerun-if-changed={}", dsp.src);
+
+        let out_file = Path::new(&out_dir).join(dsp.out_name);
+
+        let status = Command::new("faust")
+            .args(["-lang", "rust", "-cn", dsp.class_name, "-o"])
+            .arg(&out_file)
+            .arg(dsp.src)
+            .status()
+            .expect("failed to run faust compiler");
+
+        assert!(status.success(), "faust compilation failed for {}", dsp.src);
+
+        let generated = std::fs::read_to_string(&out_file).unwrap();
+        let wrapped = format!("{FAUST_PREAMBLE}\n{generated}");
+        std::fs::write(&out_file, wrapped).unwrap();
+    }
 }
