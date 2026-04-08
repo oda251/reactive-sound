@@ -11,6 +11,7 @@ pub struct AudioOutput {
     _stream: Stream,
     cmd_tx: mpsc::Sender<Command>,
     playhead: Arc<AtomicU64>,
+    start_time: std::time::Instant,
 }
 
 impl AudioOutput {
@@ -40,10 +41,12 @@ impl AudioOutput {
         };
 
         stream.play()?;
+        let start_time = std::time::Instant::now();
         Ok(Self {
             _stream: stream,
             cmd_tx,
             playhead,
+            start_time,
         })
     }
 
@@ -53,6 +56,10 @@ impl AudioOutput {
 
     pub fn playhead(&self) -> f32 {
         f32::from_bits(self.playhead.load(Ordering::Relaxed) as u32)
+    }
+
+    pub fn start_time(&self) -> std::time::Instant {
+        self.start_time
     }
 }
 

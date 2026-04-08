@@ -56,11 +56,12 @@ impl App {
         egui_tx: mpsc::Sender<InputEvent>,
         event_rx: mpsc::Receiver<InputEvent>,
     ) -> Self {
+        let epoch = engine.start_time();
         Self {
             engine,
             egui_tx,
             event_rx,
-            accumulator: RhythmAccumulator::new(),
+            accumulator: RhythmAccumulator::new(epoch),
             click: KeyClickEffect::new(),
             key_count: 0,
             last_update: None,

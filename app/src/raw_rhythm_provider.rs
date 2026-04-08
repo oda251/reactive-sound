@@ -17,14 +17,14 @@ pub const MEASURES: usize = 10;
 
 pub struct RhythmAccumulator {
     timestamps: VecDeque<Instant>,
-    created_at: Instant,
+    epoch: Instant,
 }
 
 impl RhythmAccumulator {
-    pub fn new() -> Self {
+    pub fn new(epoch: Instant) -> Self {
         Self {
             timestamps: VecDeque::new(),
-            created_at: Instant::now(),
+            epoch,
         }
     }
 
@@ -49,7 +49,7 @@ impl RhythmAccumulator {
     /// Cycles at the same speed as the playhead (1 measure = 2 seconds).
     pub fn input_cursor(&self, now: Instant) -> f32 {
         let measure_duration_secs = WINDOW.as_secs_f32() / MEASURES as f32;
-        let elapsed = now.duration_since(self.created_at).as_secs_f32();
+        let elapsed = now.duration_since(self.epoch).as_secs_f32();
         (elapsed / measure_duration_secs).fract()
     }
 
@@ -58,22 +58,25 @@ impl RhythmAccumulator {
     /// Resets every measure (2 seconds).
     pub fn current_measure_notes(&self, now: Instant) -> Vec<f32> {
         let measure_duration_secs = WINDOW.as_secs_f32() / MEASURES as f32;
-        let elapsed = now.duration_since(self.created_at).as_secs_f32();
+        let elapsed = now.duration_since(self.epoch).as_secs_f32();
         let measure_start_elapsed = (elapsed / measure_duration_secs).floor() * measure_duration_secs;
-        let measure_start = self.created_at + std::time::Duration::from_secs_f32(measure_start_elapsed);
-        let measure_end = measure_start + std::time::Duration::from_secs_f32(measure_duration_secs);
+        let measure_start = self.epoch + Duration::from_secs_f32(measure_start_elapsed);
+        let measure_end = measure_start + Duration::from_secs_f32(measure_duration_secs);
 
-        self.timestamps
-            .iter()
-            .filter_map(|&ts| {
-                if ts >= measure_start && ts < measure_end {
-                    let pos = ts.duration_since(measure_start).as_secs_f32() / measure_duration_secs;
-                    Some(pos.clamp(0.0, 1.0))
-                } else {
-                    None
-                }
-            })
-            .collect()
+        // Reverse iterate — timestamps are chronological, so recent ones are at the back.
+        // Stop as soon as we pass the measure start (everything before is older).
+        let mut notes = Vec::new();
+        for &ts in self.timestamps.iter().rev() {
+            if ts < measure_start {
+                break;
+            }
+            if ts < measure_end {
+                let pos = ts.duration_since(measure_start).as_secs_f32() / measure_duration_secs;
+                notes.push(pos.clamp(0.0, 1.0));
+            }
+        }
+        notes.reverse();
+        notes
     }
 
     fn prune(&mut self, now: Instant) {

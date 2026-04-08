@@ -44,6 +44,11 @@ impl Engine {
         self.audio.playhead()
     }
 
+    /// The wall-clock time when the audio engine started.
+    pub fn start_time(&self) -> std::time::Instant {
+        self.audio.start_time()
+    }
+
     fn send(&self, cmd: Command) -> Result<(), EngineError> {
         self.audio
             .send(cmd)
