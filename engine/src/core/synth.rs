@@ -6,4 +6,5 @@ pub trait Synth {
     fn note_off(&mut self, note: u8);
     fn set_voice_param(&mut self, voice: usize, param: i32, value: f32);
     fn render_interleaved(&mut self, out: &mut [f32], frames: usize) -> usize;
+    fn click(&mut self, gain: f32);
 }

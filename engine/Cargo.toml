@@ -9,3 +9,5 @@ crate-type = ["lib", "cdylib"]
 [dependencies]
 cpal = "0.15"
 log = "0.4"
+rtrb = "0.3"
+anyhow = "1"

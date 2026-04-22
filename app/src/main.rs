@@ -3,13 +3,13 @@ mod lane;
 mod raw_rhythm_provider;
 
 use eframe::egui;
-use reactive_bgm_engine::{AccumulativeEffect, Engine, ImmediateEffect, InputEvent};
+use reactive_bgm_engine::{AccumulativeEffect, Engine, ImmediateEffect, InputEffect, InputEvent};
 use std::sync::mpsc;
 use std::time::Instant;
 
 use input::{EguiAdapter, InputAdapter, RdevAdapter};
 use lane::{draw_lane, split_into_measures, CursorStyle, LaneConfig};
-use raw_rhythm_provider::{KeyClickEffect, RhythmAccumulator, MEASURES};
+use raw_rhythm_provider::{KeyClickEffect, RhythmAccumulator};
 
 fn main() {
     env_logger::init();
@@ -18,14 +18,13 @@ fn main() {
 
     let (event_tx, event_rx) = mpsc::channel::<InputEvent>();
 
-    // Input adapters — add more here (e.g., MidiAdapter, OscAdapter)
     RdevAdapter.start(event_tx.clone());
 
     let egui_tx = event_tx;
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([520.0, 580.0])
+            .with_inner_size([520.0, 400.0])
             .with_title("Reactive BGM"),
         ..Default::default()
     };
@@ -45,10 +44,9 @@ struct App {
     egui_tx: mpsc::Sender<InputEvent>,
     event_rx: mpsc::Receiver<InputEvent>,
     immediate_effects: Vec<Box<dyn ImmediateEffect>>,
-    accumulative_effects: Vec<Box<dyn AccumulativeEffect>>,
+    accumulator: RhythmAccumulator,
     key_count: u64,
     last_update: Option<Instant>,
-    committed_positions: Vec<f32>,
     cached_score_events: Vec<Vec<f32>>,
 }
 
@@ -59,25 +57,18 @@ impl App {
         event_rx: mpsc::Receiver<InputEvent>,
     ) -> Self {
         let epoch = engine.start_time();
+        let accumulator = RhythmAccumulator::new(epoch);
+        let measures = accumulator.measures();
         Self {
             engine,
             egui_tx,
             event_rx,
             immediate_effects: vec![Box::new(KeyClickEffect::new())],
-            accumulative_effects: vec![Box::new(RhythmAccumulator::new(epoch))],
+            accumulator,
             key_count: 0,
             last_update: None,
-            committed_positions: Vec::new(),
-            cached_score_events: vec![Vec::new(); MEASURES],
+            cached_score_events: vec![Vec::new(); measures],
         }
-    }
-
-    fn accumulator(&self) -> &RhythmAccumulator {
-        // The first accumulative effect is always the rhythm accumulator
-        self.accumulative_effects[0]
-            .as_any()
-            .downcast_ref::<RhythmAccumulator>()
-            .expect("first accumulative effect must be RhythmAccumulator")
     }
 }
 
@@ -92,42 +83,42 @@ impl eframe::App for App {
             for eff in &mut self.immediate_effects {
                 eff.on_event(&event, now);
             }
-            for eff in &mut self.accumulative_effects {
-                eff.on_event(&event, now);
-            }
+            self.accumulator.on_event(&event, now);
         }
 
-        // Drain immediate actions
         for eff in &mut self.immediate_effects {
             for action in eff.drain_actions() {
                 let _ = self.engine.send_immediate(action);
             }
         }
 
-        // Update accumulative patterns periodically
+        self.accumulator.tick(now);
+
         let should_update = match self.last_update {
             Some(last) => now.duration_since(last).as_millis() >= UPDATE_INTERVAL_MS,
             None => true,
         };
 
         if should_update {
-            for (i, eff) in self.accumulative_effects.iter().enumerate() {
-                let pattern = eff.score(now);
-                let _ = self.engine.set_pattern(i, pattern);
-            }
-            // GUI uses the first accumulator for display
-            self.committed_positions = self.accumulator().note_positions(now);
-            self.cached_score_events = split_into_measures(&self.committed_positions, MEASURES);
+            let pattern = self.accumulator.score(now);
+            let _ = self.engine.set_pattern(0, pattern);
             self.last_update = Some(now);
         }
 
+        {
+            let positions = self.accumulator.live_positions();
+            let measures = self.cached_score_events.len();
+            self.cached_score_events = split_into_measures(&positions, measures);
+        }
+
         let playhead = self.engine.playhead();
-        let playhead_measure = ((playhead * MEASURES as f32) as usize).min(MEASURES - 1);
-        let playhead_in_measure = (playhead * MEASURES as f32).fract();
+        let measures = self.cached_score_events.len();
+        let measures_f = measures as f32;
+        let playhead_measure = ((playhead * measures_f) as usize).min(measures - 1);
+        let playhead_in_measure = (playhead * measures_f).fract();
 
         let lane_width = ui.available_width() - 30.0;
 
-        // --- UI ---
         ui.heading("Reactive BGM");
         ui.separator();
 
@@ -135,17 +126,16 @@ impl eframe::App for App {
             ui.label("Keys:");
             ui.strong(format!("{}", self.key_count));
             ui.label("  Events:");
-            ui.strong(format!("{}", self.accumulator().event_count()));
+            ui.strong(format!("{}", self.accumulator.event_count()));
         });
 
-        // === Score ===
         ui.separator();
         ui.label("Score");
         ui.add_space(2.0);
 
         let score_note_color = |_pos: f32| egui::Color32::from_rgb(60, 220, 60);
 
-        for m in 0..MEASURES {
+        for m in 0..measures {
             let is_active = m == playhead_measure;
             let config = LaneConfig::new(lane_width, 16.0)
                 .bg(if is_active {
@@ -173,14 +163,13 @@ impl eframe::App for App {
             });
         }
 
-        // === Input ===
         ui.add_space(8.0);
         ui.separator();
         ui.label("Input (1 measure)");
         ui.add_space(2.0);
 
-        let input_cursor_pos = self.accumulator().input_cursor(now);
-        let measure_notes = self.accumulator().current_measure_notes(now);
+        let input_cursor_pos = self.accumulator.input_cursor(now);
+        let measure_notes = self.accumulator.current_measure_notes(now);
 
         let input_note_color = |_pos: f32| egui::Color32::from_rgb(80, 180, 255);
 

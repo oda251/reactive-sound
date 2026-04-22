@@ -7,6 +7,12 @@ use crate::core::scheduler::PatternSlot;
 pub enum ImmediateAction {
     NoteOn { note: u8, gain: f32 },
     NoteOff { note: u8 },
+    NoteOnOff {
+        note: u8,
+        gain: f32,
+        duration_samples: u32,
+    },
+    Click { gain: f32 },
     SetParam(i32, f32),
 }
 
@@ -22,6 +28,6 @@ pub trait ImmediateEffect: InputEffect {
 
 /// Accumulates input over time and produces a PatternSlot for looped playback.
 pub trait AccumulativeEffect: InputEffect {
-    fn score(&self, now: Instant) -> PatternSlot;
-    fn as_any(&self) -> &dyn std::any::Any;
+    fn tick(&mut self, now: Instant);
+    fn score(&mut self, now: Instant) -> PatternSlot;
 }

@@ -1,5 +1,3 @@
-use std::sync::mpsc;
-
 use crate::core::effect::ImmediateAction;
 use crate::core::scheduler::ParamValue;
 use crate::core::synth::Synth;
@@ -33,7 +31,7 @@ impl EventCollector {
 pub struct Bridge {
     scheduler: Scheduler,
     dsp: Box<dyn Synth + Send>,
-    cmd_rx: mpsc::Receiver<Command>,
+    cmd_rx: rtrb::Consumer<Command>,
     collector: EventCollector,
     channels: u16,
     block_size: usize,
@@ -41,6 +39,7 @@ pub struct Bridge {
     ring_read: usize,
     ring_avail: usize,
     faust_buf: Vec<f32>,
+    pending_offs: Vec<(u8, u32)>,
 }
 
 const BLOCK_SIZE: usize = 128;
@@ -49,7 +48,7 @@ impl Bridge {
     pub fn new(
         scheduler: Scheduler,
         dsp: Box<dyn Synth + Send>,
-        cmd_rx: mpsc::Receiver<Command>,
+        cmd_rx: rtrb::Consumer<Command>,
         config: &EngineConfig,
     ) -> Self {
         let block_samples = BLOCK_SIZE * config.channels as usize;
@@ -65,6 +64,7 @@ impl Bridge {
             ring_read: 0,
             ring_avail: 0,
             faust_buf: vec![0.0; block_samples],
+            pending_offs: Vec::with_capacity(8),
         }
     }
 
@@ -73,7 +73,7 @@ impl Bridge {
     }
 
     pub fn fill(&mut self, output: &mut [f32]) {
-        while let Ok(cmd) = self.cmd_rx.try_recv() {
+        while let Ok(cmd) = self.cmd_rx.pop() {
             match cmd {
                 Command::SetPattern(idx, slot) => self.scheduler.set_pattern(idx, slot),
                 Command::Enqueue(note) => self.scheduler.enqueue(note),
@@ -105,6 +105,17 @@ impl Bridge {
                 self.dsp.note_on(note, gain);
             }
             ImmediateAction::NoteOff { note } => self.dsp.note_off(note),
+            ImmediateAction::NoteOnOff {
+                note,
+                gain,
+                duration_samples,
+            } => {
+                self.dsp.note_on(note, gain);
+                self.pending_offs.push((note, duration_samples));
+            }
+            ImmediateAction::Click { gain } => {
+                self.dsp.click(gain);
+            }
             ImmediateAction::SetParam(param, value) => self.dsp.set_voice_param(0, param, value),
         }
     }
@@ -141,6 +152,18 @@ impl Bridge {
         for pv in &self.collector.param_changes {
             self.dsp.set_voice_param(0, pv.param, pv.value);
         }
+
+        // Process pending auto-NoteOff timers
+        let bs_u32 = bs as u32;
+        self.pending_offs.retain_mut(|(note, remaining)| {
+            if *remaining <= bs_u32 {
+                self.dsp.note_off(*note);
+                false
+            } else {
+                *remaining -= bs_u32;
+                true
+            }
+        });
 
         self.faust_buf[..block_samples].fill(0.0);
         self.dsp.render_interleaved(&mut self.faust_buf[..block_samples], bs);

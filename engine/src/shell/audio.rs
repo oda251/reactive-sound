@@ -1,47 +1,55 @@
+use anyhow::{bail, Context};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::Arc;
 
-use crate::core::{EngineConfig, Scheduler};
 use crate::core::dsp::DspProcessor;
+use crate::core::{EngineConfig, Scheduler};
 use crate::shell::bridge::Bridge;
 use crate::shell::command::Command;
 
+const CMD_RING_CAPACITY: usize = 256;
+
 pub struct AudioOutput {
     _stream: Stream,
-    cmd_tx: mpsc::Sender<Command>,
+    cmd_tx: rtrb::Producer<Command>,
     playhead: Arc<AtomicU64>,
     start_time: std::time::Instant,
 }
 
 impl AudioOutput {
-    pub fn start(config: &EngineConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn start(config: &EngineConfig) -> anyhow::Result<Self> {
         let device = resolve_device(config)?;
-        let stream_config = device.default_output_config()?;
+        let stream_config = device
+            .default_output_config()
+            .context("failed to get default output config")?;
 
         let sample_rate = config.sample_rate_or(stream_config.sample_rate().0);
         let dsp = Box::new(DspProcessor::new(sample_rate, 128));
         let scheduler = Scheduler::new(sample_rate);
 
-        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (cmd_tx, cmd_rx) = rtrb::RingBuffer::new(CMD_RING_CAPACITY);
 
         let playhead = Arc::new(AtomicU64::new(0));
         let playhead_writer = playhead.clone();
 
-        let bridge = Mutex::new(Bridge::new(scheduler, dsp, cmd_rx, config));
+        let bridge = Bridge::new(scheduler, dsp, cmd_rx, config);
 
         let stream = match stream_config.sample_format() {
             SampleFormat::F32 => {
                 build_stream_f32(&device, &stream_config.into(), bridge, playhead_writer)?
             }
-            SampleFormat::I16 => {
-                build_stream_convert::<i16>(&device, &stream_config.into(), bridge, playhead_writer)?
-            }
-            fmt => return Err(format!("unsupported sample format: {fmt:?}").into()),
+            SampleFormat::I16 => build_stream_convert::<i16>(
+                &device,
+                &stream_config.into(),
+                bridge,
+                playhead_writer,
+            )?,
+            fmt => bail!("unsupported sample format: {fmt:?}"),
         };
 
-        stream.play()?;
+        stream.play().context("failed to start audio stream")?;
         let start_time = std::time::Instant::now();
         Ok(Self {
             _stream: stream,
@@ -51,8 +59,8 @@ impl AudioOutput {
         })
     }
 
-    pub fn send(&self, cmd: Command) -> Result<(), mpsc::SendError<Command>> {
-        self.cmd_tx.send(cmd)
+    pub fn send(&mut self, cmd: Command) -> Result<(), rtrb::PushError<Command>> {
+        self.cmd_tx.push(cmd)
     }
 
     pub fn playhead(&self) -> f32 {
@@ -64,11 +72,13 @@ impl AudioOutput {
     }
 }
 
-fn resolve_device(config: &EngineConfig) -> Result<Device, Box<dyn std::error::Error>> {
+fn resolve_device(config: &EngineConfig) -> anyhow::Result<Device> {
     let host = cpal::default_host();
 
     if let Some(name) = &config.device_name {
-        let devices = host.output_devices()?;
+        let devices = host
+            .output_devices()
+            .context("failed to enumerate output devices")?;
         for d in devices {
             if d.name()
                 .map(|n| n.contains(name.as_str()))
@@ -77,29 +87,24 @@ fn resolve_device(config: &EngineConfig) -> Result<Device, Box<dyn std::error::E
                 return Ok(d);
             }
         }
-        return Err(format!("audio device not found: {name}").into());
+        bail!("audio device not found: {name}");
     }
 
     host.default_output_device()
-        .ok_or_else(|| "no default output device".into())
+        .context("no default output device")
 }
 
 fn build_stream_f32(
     device: &Device,
     config: &StreamConfig,
-    bridge: Mutex<Bridge>,
+    mut bridge: Bridge,
     playhead: Arc<AtomicU64>,
-) -> Result<Stream, Box<dyn std::error::Error>> {
+) -> anyhow::Result<Stream> {
     let stream = device.build_output_stream(
         config,
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            if let Ok(mut br) = bridge.lock() {
-                br.fill(data);
-                playhead.store(
-                    br.playhead(0).to_bits() as u64,
-                    Ordering::Relaxed,
-                );
-            }
+            bridge.fill(data);
+            playhead.store(bridge.playhead(0).to_bits() as u64, Ordering::Relaxed);
         },
         |err| log::error!("audio stream error: {err}"),
         None,
@@ -112,25 +117,20 @@ fn build_stream_convert<
 >(
     device: &Device,
     config: &StreamConfig,
-    bridge: Mutex<Bridge>,
+    mut bridge: Bridge,
     playhead: Arc<AtomicU64>,
-) -> Result<Stream, Box<dyn std::error::Error>> {
+) -> anyhow::Result<Stream> {
     let mut convert_buf: Vec<f32> = Vec::new();
 
     let stream = device.build_output_stream(
         config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
-            if let Ok(mut br) = bridge.lock() {
-                convert_buf.resize(data.len(), 0.0);
-                br.fill(&mut convert_buf);
-                for (i, sample) in data.iter_mut().enumerate() {
-                    *sample = T::from_sample(convert_buf[i]);
-                }
-                playhead.store(
-                    br.playhead(0).to_bits() as u64,
-                    Ordering::Relaxed,
-                );
+            convert_buf.resize(data.len(), 0.0);
+            bridge.fill(&mut convert_buf);
+            for (i, sample) in data.iter_mut().enumerate() {
+                *sample = T::from_sample(convert_buf[i]);
             }
+            playhead.store(bridge.playhead(0).to_bits() as u64, Ordering::Relaxed);
         },
         |err| log::error!("audio stream error: {err}"),
         None,

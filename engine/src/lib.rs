@@ -19,24 +19,24 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn start_default() -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn start_default() -> anyhow::Result<Self> {
         Self::start(config_from_env())
     }
 
-    pub fn start(config: EngineConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn start(config: EngineConfig) -> anyhow::Result<Self> {
         let audio = audio::AudioOutput::start(&config)?;
         Ok(Self { audio })
     }
 
-    pub fn set_pattern(&self, index: usize, slot: PatternSlot) -> Result<(), EngineError> {
+    pub fn set_pattern(&mut self, index: usize, slot: PatternSlot) -> Result<(), EngineError> {
         self.send(Command::SetPattern(index, slot))
     }
 
-    pub fn enqueue(&self, note: QueuedNote) -> Result<(), EngineError> {
+    pub fn enqueue(&mut self, note: QueuedNote) -> Result<(), EngineError> {
         self.send(Command::Enqueue(note))
     }
 
-    pub fn send_immediate(&self, action: ImmediateAction) -> Result<(), EngineError> {
+    pub fn send_immediate(&mut self, action: ImmediateAction) -> Result<(), EngineError> {
         self.send(Command::Immediate(action))
     }
 
@@ -44,27 +44,26 @@ impl Engine {
         self.audio.playhead()
     }
 
-    /// The wall-clock time when the audio engine started.
     pub fn start_time(&self) -> std::time::Instant {
         self.audio.start_time()
     }
 
-    fn send(&self, cmd: Command) -> Result<(), EngineError> {
+    fn send(&mut self, cmd: Command) -> Result<(), EngineError> {
         self.audio
             .send(cmd)
-            .map_err(|_| EngineError::AudioThreadStopped)
+            .map_err(|_| EngineError::ChannelFull)
     }
 }
 
 #[derive(Debug)]
 pub enum EngineError {
-    AudioThreadStopped,
+    ChannelFull,
 }
 
 impl std::fmt::Display for EngineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::AudioThreadStopped => write!(f, "audio thread has stopped"),
+            Self::ChannelFull => write!(f, "command ring buffer full"),
         }
     }
 }

@@ -1,32 +1,22 @@
-#[allow(
-    clippy::all,
-    unused_parens,
-    non_snake_case,
-    non_camel_case_types,
-    dead_code,
-    unused_variables,
-    unused_mut,
-    non_upper_case_globals
-)]
-mod faust_synth {
-    include!(concat!(env!("OUT_DIR"), "/faust_synth.rs"));
+macro_rules! faust_module {
+    ($mod_name:ident, $file:expr) => {
+        #[allow(
+            clippy::all, unused_parens, non_snake_case, non_camel_case_types,
+            dead_code, unused_variables, unused_mut, non_upper_case_globals
+        )]
+        mod $mod_name {
+            include!(concat!(env!("OUT_DIR"), "/", $file));
+        }
+    };
 }
 
-#[allow(
-    clippy::all,
-    unused_parens,
-    non_snake_case,
-    non_camel_case_types,
-    dead_code,
-    unused_variables,
-    unused_mut,
-    non_upper_case_globals
-)]
-mod faust_piano {
-    include!(concat!(env!("OUT_DIR"), "/faust_piano.rs"));
-}
+faust_module!(faust_synth, "faust_synth.rs");
+faust_module!(faust_piano, "faust_piano.rs");
+faust_module!(faust_click, "faust_click.rs");
+faust_module!(faust_raindrop, "faust_raindrop.rs");
 
-use faust_piano::*;
+use faust_raindrop::*;
+use faust_click::FaustClick;
 
 pub const PARAM_FREQ: i32 = 0;
 pub const PARAM_GAIN: i32 = 1;
@@ -36,10 +26,13 @@ use crate::core::synth::Synth;
 use crate::core::voice::VoiceAllocator;
 
 pub struct DspProcessor {
-    voices: Vec<FaustPiano>,
+    voices: Vec<FaustRaindrop>,
     allocator: VoiceAllocator,
     voice_bufs: Vec<[Vec<f32>; 2]>,
     mix_buf: [Vec<f32>; 2],
+    click_voice: FaustClick,
+    click_buf: [Vec<f32>; 2],
+    click_blocks_remaining: u32,
 }
 
 fn midi_to_freq(note: u8) -> f32 {
@@ -53,7 +46,7 @@ impl DspProcessor {
 
         let mut voices = Vec::with_capacity(num_voices);
         for _ in 0..num_voices {
-            let mut synth = FaustPiano::new();
+            let mut synth = FaustRaindrop::new();
             synth.init(sample_rate as i32);
             voices.push(synth);
         }
@@ -62,11 +55,17 @@ impl DspProcessor {
             .map(|_| [vec![0.0; max_block_size], vec![0.0; max_block_size]])
             .collect();
 
+        let mut click_voice = FaustClick::new();
+        click_voice.init(sample_rate as i32);
+
         Self {
             voices,
             allocator,
             voice_bufs,
             mix_buf: [vec![0.0; max_block_size], vec![0.0; max_block_size]],
+            click_voice,
+            click_buf: [vec![0.0; max_block_size], vec![0.0; max_block_size]],
+            click_blocks_remaining: 0,
         }
     }
 }
@@ -92,6 +91,14 @@ impl Synth for DspProcessor {
         }
     }
 
+    fn click(&mut self, gain: f32) {
+        self.click_voice
+            .set_param(faust_click::ParamIndex(PARAM_GAIN), gain);
+        self.click_voice
+            .set_param(faust_click::ParamIndex(PARAM_GATE), 1.0);
+        self.click_blocks_remaining = 20;
+    }
+
     fn render_interleaved(&mut self, out: &mut [f32], frames: usize) -> usize {
         let frames = frames.min(out.len() / 2);
         let inputs: &[&[f32]] = &[];
@@ -112,6 +119,21 @@ impl Synth for DspProcessor {
                 self.mix_buf[0][j] += b0[j];
                 self.mix_buf[1][j] += b1[j];
             }
+        }
+
+        if self.click_blocks_remaining > 0 {
+            let [c0, c1] = &mut self.click_buf;
+            c0[..frames].fill(0.0);
+            c1[..frames].fill(0.0);
+            self.click_voice
+                .compute(frames, inputs, &mut [&mut c0[..frames], &mut c1[..frames]]);
+            for j in 0..frames {
+                self.mix_buf[0][j] += c0[j];
+                self.mix_buf[1][j] += c1[j];
+            }
+            self.click_voice
+                .set_param(faust_click::ParamIndex(PARAM_GATE), 0.0);
+            self.click_blocks_remaining -= 1;
         }
 
         for i in 0..frames {

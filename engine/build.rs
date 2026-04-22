@@ -57,6 +57,8 @@ struct DspFile {
 const DSP_FILES: &[DspFile] = &[
     DspFile { src: "dsp/synth.dsp", class_name: "FaustSynth", out_name: "faust_synth.rs" },
     DspFile { src: "dsp/piano.dsp", class_name: "FaustPiano", out_name: "faust_piano.rs" },
+    DspFile { src: "dsp/click.dsp", class_name: "FaustClick", out_name: "faust_click.rs" },
+    DspFile { src: "dsp/raindrop.dsp", class_name: "FaustRaindrop", out_name: "faust_raindrop.rs" },
 ];
 
 fn main() {
